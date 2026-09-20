@@ -198,17 +198,18 @@ third_party:
 
 当预测出现达到阈值的「火烧云」窗口时，可自动推送到微信（融合 sunsetbot / ohyep-sunsetglow 的推送能力）：
 
-1. 到 <https://sct.ftqq.com> 用微信登录，获取你的 **SendKey**；
-2. 编辑 `config.yaml`：
+1. 到 <https://sct.ftqq.com> 用微信登录，获取你的 **SendKey**（`SCT` 开头）；
+2. 复制 `config.local.yaml.example` 为 `config.local.yaml`，填入 SendKey（**不要填进 `config.yaml`**——那是会提交到公开仓库的文件，密钥放这里会泄露；`config.local.yaml` 已被 `.gitignore` 排除）：
 
 ```yaml
+# config.local.yaml
 notify:
   enabled: true
-  sckey: "你的SendKey"
+  sckey: "SCT你的SendKey"
   threshold: 70    # 预测分达到该值（对应"大烧"）才推送
 ```
 
-3. 运行 `python daily_run.py`，若当天最佳窗口达到阈值，会自动收到微信消息（标题 + 日期/时段/评分/鲜艳度指数）。未配置 `sckey` 时静默跳过，不影响预测。
+3. 运行 `python daily_run.py`，若当天最佳窗口达到阈值，会自动收到微信消息（标题 + 日期/时段/评分/鲜艳度指数）。未配置 `sckey` 时静默跳过，不影响预测。免费版每天 5 条推送。
 
 ## 每天自动运行
 

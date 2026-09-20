@@ -68,7 +68,12 @@ def _merge(dst, src):
 
 
 def load_config(path=None):
-    """加载配置，返回完整配置字典。"""
+    """加载配置，返回完整配置字典。
+
+    优先级：config.yaml（默认）< config.local.yaml（本地覆盖，不入库）。
+    敏感信息（如 notify.sckey、database.password、星图云 token）建议写在
+    config.local.yaml 中，该文件已被 .gitignore 排除，不会提交到仓库。
+    """
     cfg = copy.deepcopy(DEFAULTS)
     if path is None:
         path = os.path.join(BASE_DIR, "config.yaml")
@@ -76,6 +81,14 @@ def load_config(path=None):
         with open(path, "r", encoding="utf-8") as f:
             user_cfg = yaml.safe_load(f) or {}
         _merge(cfg, user_cfg)
+
+    # 本地覆盖（可放密钥，不入库）
+    local_path = os.path.join(BASE_DIR, "config.local.yaml")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
+            local_cfg = yaml.safe_load(f) or {}
+        _merge(cfg, local_cfg)
+
     # 相对路径统一解析为基于项目根目录的绝对路径
     cfg["model"]["model_path"] = os.path.join(BASE_DIR, cfg["model"]["model_path"])
     cfg["data"]["posts_csv"] = os.path.join(BASE_DIR, cfg["data"]["posts_csv"])

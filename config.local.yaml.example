@@ -1,0 +1,19 @@
+# 本地覆盖配置示例
+# 使用方法：把本文件复制一份，改名为 config.local.yaml（去掉 .example），
+# 然后填入你自己的密钥。config.local.yaml 已被 .gitignore 排除，不会被提交到 GitHub。
+# 敏感信息（SendKey、数据库密码、第三方 token）都放这里，避免泄露到公开仓库。
+
+notify:
+  enabled: true
+  sckey: "SCT你的SendKey"   # Server酱 SendKey，https://sct.ftqq.com 微信扫码登录后获取
+  threshold: 70              # 预测分达到该值（对应"大烧"）才推送
+
+# 如需给本地 MySQL 设置密码，也写在这里（覆盖 config.yaml）：
+# database:
+#   password: "你的数据库密码"
+
+# 星图云第三方对比（可选）：
+# third_party:
+#   geovisearth:
+#     enabled: true
+#     token: "星图云token"
