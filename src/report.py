@@ -110,6 +110,91 @@ def _window_block(title, emoji, f):
     </div>'''
 
 
+_WEATHER_CODE = {
+    0: ("晴", "☀️"),
+    1: ("晴间多云", "🌤️"),
+    2: ("多云", "⛅"),
+    3: ("阴", "☁️"),
+    45: ("雾", "🌫️"),
+    48: ("雾凇", "🌫️"),
+    51: ("毛毛雨", "🌦️"),
+    53: ("毛毛雨", "🌦️"),
+    55: ("毛毛雨", "🌦️"),
+    56: ("冻毛毛雨", "🌧️"),
+    57: ("冻毛毛雨", "🌧️"),
+    61: ("小雨", "🌧️"),
+    63: ("中雨", "🌧️"),
+    65: ("大雨", "🌧️"),
+    66: ("冻雨", "🌧️"),
+    67: ("冻雨", "🌧️"),
+    71: ("小雪", "🌨️"),
+    73: ("中雪", "🌨️"),
+    75: ("大雪", "❄️"),
+    77: ("雪粒", "❄️"),
+    80: ("阵雨", "🌧️"),
+    81: ("阵雨", "🌧️"),
+    82: ("强阵雨", "⛈️"),
+    85: ("阵雪", "🌨️"),
+    86: ("强阵雪", "❄️"),
+    95: ("雷暴", "⛈️"),
+    96: ("雷暴伴冰雹", "⛈️"),
+    99: ("强雷暴伴冰雹", "⛈️"),
+}
+
+
+def _wx_desc(code):
+    """WMO 天气代码 -> (中文描述, emoji)。"""
+    if code is None:
+        return "—", "🌫️"
+    return _WEATHER_CODE.get(int(code), ("—", "🌫️"))
+
+
+def _hhmm(iso):
+    """ISO 时间字符串 'YYYY-MM-DDTHH:MM' -> 'HH:MM'。"""
+    if not iso:
+        return ""
+    return iso[11:16]
+
+
+def _daily_weather_line(daily):
+    """渲染每日天气概览条（天气现象 / 温度 / 日出日落 / 降水）。"""
+    if not daily:
+        return ""
+    desc, emoji = _wx_desc(daily.get("code"))
+    tmax = daily.get("tmax")
+    tmin = daily.get("tmin")
+    temp = ""
+    if tmax is not None and tmin is not None:
+        temp = f'{tmin:.0f}~{tmax:.0f}℃'
+    elif tmax is not None:
+        temp = f'{tmax:.0f}℃'
+    sr = _hhmm(daily.get("sunrise"))
+    ss = _hhmm(daily.get("sunset"))
+    psum = daily.get("precip_sum")
+    pprob = daily.get("precip_prob")
+    rain = ""
+    if pprob is not None and psum is not None:
+        rain = f'降水 {pprob:.0f}% · {psum:.1f}mm'
+    elif pprob is not None:
+        rain = f'降水概率 {pprob:.0f}%'
+    parts = [f'{emoji} {desc}']
+    if temp:
+        parts.append(f'🌡️ {temp}')
+    if sr:
+        parts.append(f'🌅 {sr}')
+    if ss:
+        parts.append(f'🌇 {ss}')
+    if rain:
+        parts.append(f'💧 {rain}')
+    return (
+        f'<div style="padding:7px 16px;font-size:12px;color:#475569;'
+        f'background:#fffbeb;border-bottom:1px solid #fef3c7;'
+        f'display:flex;flex-wrap:wrap;gap:6px 14px;line-height:1.6;">'
+        + "".join(f'<span>{html.escape(p)}</span>' for p in parts)
+        + '</div>'
+    )
+
+
 def _day_card(r):
     w = r["windows"]
     date_str = dt.datetime.strptime(r["date"], "%Y-%m-%d")
@@ -127,12 +212,15 @@ def _day_card(r):
     if evening is not None:
         blocks += _window_block("晚霞", "🌇", evening)
 
+    weather_line = _daily_weather_line(r.get("daily"))
+
     return f'''
     <div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05);">
       <div style="padding:14px 16px;background:linear-gradient(90deg,#fdf2f8,#fff7ed);font-weight:800;font-size:16px;color:#1e293b;display:flex;justify-content:space-between;">
         <span>{title}</span>
         <span style="font-size:12px;font-weight:600;color:#f97316;">最佳:{'朝霞' if best_window == 'morning' else '晚霞'}</span>
       </div>
+      {weather_line}
       {blocks}
     </div>'''
 

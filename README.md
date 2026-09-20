@@ -186,6 +186,10 @@ third_party:
 
 接入点位于 `src/crosscheck.py` 的 `run_geovisearth_crosscheck()`（已预留调用桩与解析 TODO），主预测 `src/predict.py` 会自动挂载，报告里每个窗口会显示「🌐 星图云官方预报」一行。
 
+## 每日天气概览
+
+单城报告的每个日期卡片顶部会显示当天天气概览：**天气现象（☀️晴/⛅多云/☁️阴/🌧️雨…）+ 最高最低温 + 日出日落时间 + 全天降水概率与降水量**。这些数据来自 Open-Meteo 的逐日字段（`weather_code` / `temperature_2m_max/min` / `sunrise` / `sunset` / `precipitation_sum` / `precipitation_probability_max`），与朝霞晚霞评分共用同一次请求，无额外开销。
+
 ## 鲜艳度指数（0-10）
 
 除 0-100 评分和「微烧/小烧/中烧/大烧/优质大烧/世纪大烧」分级外，每个窗口还会输出一个 **0-10 鲜艳度指数**（🔥，对齐 chromasky 的 ChromaSky™ 指数），便于跨城市、跨日期横向对比。全国地图也用同一评分体系统一色阶。
@@ -259,6 +263,58 @@ zhaoxia-prediction/
     ├── report.html       # 单城报告
     └── national_map.html # 全国地图
 ```
+
+## 部署到自己的服务器
+
+项目可部署到任意 Linux/Windows 服务器（能访问 Open-Meteo 即可）。以 Windows 服务器为例。
+
+### 全自动脚本（推荐）
+
+服务器（Windows）上**以管理员身份**双击 `setup.bat`，即可全自动完成：自动下载并安装 Python → 装依赖 → 首次生成报告和全国地图 → 启动网页服务 → 注册定时任务。全程无需手动装任何东西。
+
+```bat
+setup.bat         # 全自动：装 Python + 依赖 + 首跑 + 网页服务 + 定时任务
+deploy.bat        # （备选）假设已装好 Python 的一键部署
+start_server.bat  # 手动重启网页服务
+```
+
+自动注册的两个计划任务（`setup.bat` 会创建）：
+
+- `ZhaoxiaDaily`：每天 06:30 自动预测 + 微信推送；
+- `ZhaoxiaWeb`：开机自动启动网页服务（端口 8080）。
+
+> 依赖下载走国内镜像（华为云 Python + 清华 pip），服务器在国内也能快速完成。
+
+### 一键脚本（已装 Python）
+
+部署完成后浏览器访问：
+
+- 入口页：`http://服务器IP:8080/`
+- 单城报告：`http://服务器IP:8080/report.html`
+- 全国地图：`http://服务器IP:8080/national_map.html`
+
+> 外网访问需在 Windows 防火墙放行 8080 端口。微信推送需要在服务器上另建 `config.local.yaml`（填入你的 SendKey，该文件不入库、git clone 不会带上）。
+
+### 手动步骤
+
+1. **装 Python 3.9+**，`pip install -r requirements.txt`；
+2. **上传项目**（`git clone https://github.com/shijianning/zhaoxia-prediction.git` 或直接打包上传）；
+3. **配置**：
+   - `config.yaml`：改 `city` 为你所在城市；如需全国地图，填 `map.tmap_key`（见下）；
+   - `config.local.yaml`：填 `notify.sckey`（微信推送，可选）；
+4. **跑一次验证**：`python daily_run.py --predict-only`，确认生成 `output/report.html`；
+5. **托管网页**：用 IIS / nginx / Caddy 把 `output/` 目录挂出去，即可通过浏览器访问报告；
+6. **定时自动跑**：Windows「任务计划程序」每天早晨跑 `daily_run.py`（会自动推微信）。
+
+**全国地图在服务器上**：需要申请腾讯地图 key（免费）：
+
+1. 到 <https://lbs.qq.com> 注册并完成实名/开发者认证；
+2. 控制台「应用管理」创建应用 → 添加 key（勾选「WebServiceAPI / 地图 JavaScript API」）；
+3. 把 key 填入 `config.yaml` 的 `map.tmap_key`；
+4. 在 key 设置里把**服务器域名/IP 加进「域名白名单」**（否则地图被拒）；
+5. 服务器上跑 `python national_map.py`，生成的 `output/national_map.html` 即用你自己的 key 加载地图。
+
+> 本地开发时 `map.tmap_key` 留空即可，会自动走 WorkBuddy 代理模式（前端不带 key）；填入 key 后自动切换为标准模式。
 
 ## 局限
 

@@ -115,3 +115,42 @@ def add_air_quality(day_feats, aq_data):
             hi = min(len(times) - 1, idx + 1)
             f["aod"] = mean("aerosol_optical_depth", lo, hi)
             f["pm2_5"] = mean("pm2_5", lo, hi)
+
+
+def extract_daily_weather(data):
+    """提取每日天气概览，供报告展示。
+
+    data: weather.get_forecast 的返回值（其 daily 需包含 DAILY_WEATHER_VARS）。
+    返回 {date: {code, tmax, tmin, precip_sum, precip_prob, sunrise, sunset}}，
+    字段取不到时为 None。
+    """
+    daily = data.get("daily", {})
+    days = daily.get("time", [])
+    n = len(days)
+
+    def g(var):
+        vals = daily.get(var, [])
+        if len(vals) < n:
+            vals = list(vals) + [None] * (n - len(vals))
+        return vals
+
+    code = g("weather_code")
+    tmax = g("temperature_2m_max")
+    tmin = g("temperature_2m_min")
+    psum = g("precipitation_sum")
+    pprob = g("precipitation_probability_max")
+    sunrise = g("sunrise")
+    sunset = g("sunset")
+
+    result = {}
+    for i, day in enumerate(days):
+        result[day] = {
+            "code": code[i],
+            "tmax": tmax[i],
+            "tmin": tmin[i],
+            "precip_sum": psum[i],
+            "precip_prob": pprob[i],
+            "sunrise": sunrise[i],
+            "sunset": sunset[i],
+        }
+    return result

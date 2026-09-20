@@ -55,6 +55,9 @@ DEFAULTS = {
         "dir": "output",
         "report": "output/report.html",
     },
+    "map": {
+        "tmap_key": "",
+    },
 }
 
 

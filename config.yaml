@@ -1,5 +1,11 @@
 # 朝霞晚霞预测 —— 配置文件
 # 修改后下次运行自动生效
+#
+# ============ 各 Key/Token 获取地址速查 ============
+# 1. 腾讯地图 key（全国地图用）  → https://lbs.qq.com  （腾讯位置服务：注册实名 → 应用管理 → 创建应用 → 添加 key）
+# 2. Server酱 SendKey（微信推送）→ https://sct.ftqq.com （微信扫码登录 → SendKey 页面复制 SCT 开头密钥）
+# 3. 星图云 token（官方火烧云对比）→ https://open.geovisearth.com （可选，需申请）
+# ==================================================
 
 city:
   name: "西安"
@@ -36,6 +42,16 @@ third_party:
 output:
   dir: "output"
   report: "output/report.html"
+
+# 腾讯地图（全国地图用）
+# key 获取地址：https://lbs.qq.com（腾讯位置服务）
+#   步骤：注册并实名/开发者认证 → 控制台「应用管理」→ 创建应用 →
+#         添加 key（勾选「WebServiceAPI / 地图 JavaScript API」）→ 复制 key 填到下面。
+#   重要：申请后需在 key 设置里把「服务器域名/IP」加入「域名白名单」，否则地图会被拒。
+# tmap_key 留空 = 本地开发走代理模式（前端不带 key）；
+# 填了 key = 标准模式（部署到自己服务器用，前端用这个 key 加载地图）。
+map:
+  tmap_key: "2ERBZ-DDNYN-ZTIFI-SRNLJ-Y6ZJO-CNFXP"
 
 # 本地 MySQL 存储（预测历史 / 城市 / 训练标注）
 # 未启动 MySQL 时，程序会自动回退到文件存储，不影响预测。

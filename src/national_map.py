@@ -180,6 +180,30 @@ def _score_color(score):
     return "#94a3b8"       # 灰：微烧/平淡
 
 
+def _tmap_script(tmap_key):
+    """生成腾讯地图 SDK 加载片段。
+
+    - 有 key：标准模式（部署到自有服务器用，前端携带用户自己的 key）。
+    - 无 key：代理模式（WorkBuddy 本地环境，占位符必须原样保留，运行时由本地代理注入）。
+    """
+    if tmap_key:
+        return (
+            '<script src="https://map.qq.com/api/gljs?v=1.exp&key='
+            + html_escape(tmap_key)
+            + '"></script>'
+        )
+    return (
+        '<!-- 代理模式：先配置再加载 SDK，前端不携带 key -->\n'
+        '<script type="text/javascript">\n'
+        '  window._TMapSecurityConfig = {\n'
+        "    serviceHost: 'http://127.0.0.1:__WB_HTTP_PORT__/_TMapService/_wbt/__WB_TMAP_SECRET__',\n"
+        '  };\n'
+        '</script>\n'
+        '<!-- 从官方 CDN 加载 SDK，不带 key 参数 -->\n'
+        '<script src="https://map.qq.com/api/gljs?v=1.exp"></script>'
+    )
+
+
 def render_national_map(cfg, cities, results, failures, days=2):
     """渲染全国预测地图 HTML 字符串。"""
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -209,6 +233,8 @@ def render_national_map(cfg, cities, results, failures, days=2):
     html = html.replace("__N_OK__", str(n_ok))
     html = html.replace("__N_FAIL__", str(n_fail))
     html = html.replace("__FAIL_LIST__", _fail_list_html(failures))
+    tmap_key = (cfg.get("map") or {}).get("tmap_key", "")
+    html = html.replace("__TMAP_SCRIPT__", _tmap_script(tmap_key))
     return html
 
 
@@ -288,14 +314,8 @@ _MAP_TEMPLATE = r"""<!DOCTYPE html>
   .iw .row .k { color: #64748b; }
   .iw .val { font-weight: 700; }
 </style>
-<!-- 1. 代理模式：先配置再加载 SDK，前端不携带 key -->
-<script type="text/javascript">
-  window._TMapSecurityConfig = {
-    serviceHost: 'http://127.0.0.1:__WB_HTTP_PORT__/_TMapService/_wbt/__WB_TMAP_SECRET__',
-  };
-</script>
-<!-- 2. 从官方 CDN 加载 SDK，不带 key 参数 -->
-<script src="https://map.qq.com/api/gljs?v=1.exp"></script>
+<!-- 地图 SDK 加载（占位符 __TMAP_SCRIPT__ 在渲染时替换为 key 模式或代理模式） -->
+__TMAP_SCRIPT__
 </head>
 <body>
 <div id="wrap">

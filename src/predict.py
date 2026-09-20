@@ -17,6 +17,7 @@ def run_prediction(cfg):
     """
     data = weather.get_forecast(cfg)
     day_feats = feat_mod.extract_day_features(data)
+    daily_wx = feat_mod.extract_daily_weather(data)
 
     # 合并空气质量（气溶胶 AOD）——用于"鲜艳度"判断（失败不影响主预测）
     try:
@@ -74,7 +75,11 @@ def run_prediction(cfg):
 
     results = []
     for date in sorted(by_date.keys()):
-        results.append({"date": date, "windows": by_date[date]})
+        results.append({
+            "date": date,
+            "windows": by_date[date],
+            "daily": daily_wx.get(date),
+        })
 
     meta = {
         "city": cfg["city"]["name"],

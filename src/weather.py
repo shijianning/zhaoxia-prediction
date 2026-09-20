@@ -31,6 +31,17 @@ HOURLY_VARS = [
     "visibility",   # 水平能见度(米)，用于"大气通透"因子（融合 sunset-prediction 5因子模型）
 ]
 
+# 每日天气概览变量（报告展示：日出日落 / 天气现象 / 最高最低温 / 全天降水）
+DAILY_WEATHER_VARS = [
+    "sunrise",
+    "sunset",
+    "weather_code",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "precipitation_sum",
+    "precipitation_probability_max",
+]
+
 
 def _request(url, params, timeout=30, retries=2):
     last_exc = None
@@ -54,7 +65,7 @@ def get_forecast(cfg, days=None):
         "latitude": city["latitude"],
         "longitude": city["longitude"],
         "hourly": ",".join(HOURLY_VARS + ["precipitation_probability"]),
-        "daily": "sunrise,sunset",
+        "daily": ",".join(DAILY_WEATHER_VARS),
         "timezone": city["timezone"],
         "forecast_days": days,
     }
