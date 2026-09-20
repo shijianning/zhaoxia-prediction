@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/model/
+output/
+*.joblib
+.DS_Store
+
+# 本地密钥/配置（勿提交真实 token 或数据库密码）
+.env
+config.local.yaml
+*.log
+
+# IDE
+.idea/
+.vscode/

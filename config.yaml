@@ -1,0 +1,55 @@
+# 朝霞晚霞预测 —— 配置文件
+# 修改后下次运行自动生效
+
+city:
+  name: "西安"
+  latitude: 34.34
+  longitude: 108.94
+  timezone: "Asia/Shanghai"
+
+forecast:
+  days: 7            # 预测未来几天的朝霞晚霞
+
+model:
+  type: "logistic"   # 模型类型: logistic(逻辑回归) / rf(随机森林)
+  bootstrap: true    # 无真实标注时，用启发式评分做弱监督预训练
+  min_samples: 30    # 训练样本少于该数时退回纯规则评分模式
+  model_path: "data/model/glow_model.joblib"
+
+data:
+  posts_csv: "data/raw/posts.csv"   # 帖子观测标注数据(可手动补充)
+  history_days: 120                 # 训练时回溯的历史天气天数
+
+# 第三方数值对比源（可选）
+# 星图云(GeoVisEarth)开放平台提供官方「火烧云预报API」，返回朝霞/晚霞质量与等级，
+# 是最直接的可对比数据源。需在 https://open.geovisearth.com 注册并申请 token（付费/配额）。
+third_party:
+  geovisearth:
+    enabled: false   # 填入 token 并改为 true 后，交叉验证会自动加入第 4 方对比
+    token: ""        # 星图云控制台申请的火烧云预报 API token
+    base_url: "https://api.open.geovisearth.com/v2/glow/fc/idxV2"
+    # 以下三个参数需在星图云控制台开通「火烧云预报」接口后，从开发文档/控制台获取：
+    productCode: ""
+    dataCode: ""
+    meteCode: ""
+
+output:
+  dir: "output"
+  report: "output/report.html"
+
+# 本地 MySQL 存储（预测历史 / 城市 / 训练标注）
+# 未启动 MySQL 时，程序会自动回退到文件存储，不影响预测。
+database:
+  enabled: true
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: ""       # initialize-insecure 生成的 root 无密码；正式使用请改
+  database: "zhaoxia"
+
+# 微信推送（Server酱）—— 融合 sunsetbot / ohyep-sunsetglow 的推送能力
+# 未配置 sckey 或 enabled=false 时静默跳过，不影响预测。
+notify:
+  enabled: false
+  sckey: ""          # Server酱 SendKey，在 https://sct.ftqq.com 登录后获取
+  threshold: 70      # 预测分达到该值（对应"大烧"）才推送
