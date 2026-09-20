@@ -46,6 +46,15 @@ _SCHEMA = [
         model_prob DOUBLE DEFAULT NULL,
         aod DOUBLE DEFAULT NULL,
         pm2_5 DOUBLE DEFAULT NULL,
+        chroma DOUBLE DEFAULT NULL,
+        `spread` DOUBLE DEFAULT NULL,
+        visibility DOUBLE DEFAULT NULL,
+        sunrise VARCHAR(8) DEFAULT NULL,
+        sunset VARCHAR(8) DEFAULT NULL,
+        tmax DOUBLE DEFAULT NULL,
+        tmin DOUBLE DEFAULT NULL,
+        precip_sum DOUBLE DEFAULT NULL,
+        precip_prob DOUBLE DEFAULT NULL,
         source VARCHAR(20) DEFAULT 'daily',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uq_city_date_window_src (city, `date`, `window`, source),
@@ -129,6 +138,40 @@ def init_schema(cfg):
             for stmt in _SCHEMA:
                 cur.execute(stmt)
         conn.close()
+        # 老库升级：为 predictions 表补上后来新增的列（幂等）
+        _migrate_predictions(cfg)
+        return True
+    except Exception:
+        return False
+
+
+# 后来新增的列（老库缺列时自动 ALTER 补齐，不删旧数据）
+_PREDICTIONS_NEW_COLUMNS = [
+    ("chroma", "DOUBLE DEFAULT NULL"),
+    ("spread", "DOUBLE DEFAULT NULL"),
+    ("visibility", "DOUBLE DEFAULT NULL"),
+    ("sunrise", "VARCHAR(8) DEFAULT NULL"),
+    ("sunset", "VARCHAR(8) DEFAULT NULL"),
+    ("tmax", "DOUBLE DEFAULT NULL"),
+    ("tmin", "DOUBLE DEFAULT NULL"),
+    ("precip_sum", "DOUBLE DEFAULT NULL"),
+    ("precip_prob", "DOUBLE DEFAULT NULL"),
+]
+
+
+def _migrate_predictions(cfg):
+    """把 predictions 表缺的列补上（MySQL 不支持 ADD COLUMN IF NOT EXISTS，需查列名）。"""
+    try:
+        conn = connect(cfg)
+        with conn.cursor() as cur:
+            cur.execute("SHOW COLUMNS FROM predictions")
+            existing = {row[0].lower() for row in cur.fetchall()}
+            for col, coldef in _PREDICTIONS_NEW_COLUMNS:
+                if col not in existing:
+                    cur.execute(
+                        "ALTER TABLE predictions ADD COLUMN `%s` %s" % (col, coldef)
+                    )
+        conn.close()
         return True
     except Exception:
         return False
@@ -176,7 +219,9 @@ def upsert_predictions(cfg, rows):
 
     rows: 列表，每项 dict，字段：
         city / date / window / score（必填）
-        vivid / grade / rule_score / model_prob / aod / pm2_5 / source（可选）
+        vivid / grade / rule_score / model_prob / aod / pm2_5 / source
+        chroma / spread / visibility / sunrise / sunset / tmax / tmin /
+        precip_sum / precip_prob（可选，缺失写 NULL）
     """
     if not rows:
         return False
@@ -187,16 +232,26 @@ def upsert_predictions(cfg, rows):
                 cur.execute(
                     "INSERT INTO predictions "
                     "(city, `date`, `window`, score, vivid, grade, rule_score, "
-                    " model_prob, aod, pm2_5, source) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    " model_prob, aod, pm2_5, chroma, `spread`, visibility, "
+                    " sunrise, sunset, tmax, tmin, precip_sum, precip_prob, source) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    " %s, %s, %s, %s, %s, %s, %s) "
                     "ON DUPLICATE KEY UPDATE "
                     "score=VALUES(score), vivid=VALUES(vivid), grade=VALUES(grade), "
                     "rule_score=VALUES(rule_score), model_prob=VALUES(model_prob), "
-                    "aod=VALUES(aod), pm2_5=VALUES(pm2_5), source=VALUES(source)",
+                    "aod=VALUES(aod), pm2_5=VALUES(pm2_5), chroma=VALUES(chroma), "
+                    "`spread`=VALUES(`spread`), visibility=VALUES(visibility), "
+                    "sunrise=VALUES(sunrise), sunset=VALUES(sunset), "
+                    "tmax=VALUES(tmax), tmin=VALUES(tmin), "
+                    "precip_sum=VALUES(precip_sum), precip_prob=VALUES(precip_prob), "
+                    "source=VALUES(source)",
                     (
                         r["city"], r["date"], r["window"], r["score"],
                         r.get("vivid"), r.get("grade"), r.get("rule_score"),
                         r.get("model_prob"), r.get("aod"), r.get("pm2_5"),
+                        r.get("chroma"), r.get("spread"), r.get("visibility"),
+                        r.get("sunrise"), r.get("sunset"), r.get("tmax"),
+                        r.get("tmin"), r.get("precip_sum"), r.get("precip_prob"),
                         r.get("source", "daily"),
                     ),
                 )
@@ -296,12 +351,14 @@ def load_posts(cfg):
 def save_national_results(cfg, results, source="national"):
     """把全国地图预测结果写入 predictions 表。
 
-    results: {city: {date: {window: {score, vivid, grade}}}}
+    results: {city: {date: {window: {score, vivid, grade}, daily: {...}}}}
+    只写入 morning/evening 两个窗口，跳过 daily 天气概览字段。
     """
     rows = []
     for city, days in results.items():
         for date, wins in days.items():
-            for window, info in wins.items():
+            for window in ("morning", "evening"):
+                info = wins.get(window)
                 if not info:
                     continue
                 rows.append({
@@ -319,13 +376,23 @@ def save_daily_results(cfg, results, city):
     """把单城每日报告结果写入 predictions 表。
 
     results: predict.run_prediction 返回的 results 列表
-             [{date, windows: {window: {final, grade, rule_score, prob, aod, ...}}}]
+             [{date, windows: {window: {final, grade, rule_score, prob, aod, ...}},
+               daily: {sunrise, sunset, tmax, tmin, precip_sum, precip_prob}}]
     """
     from .glow_rules import vividness_of
+
+    def _hhmm(iso):
+        """'2026-09-20T06:32' -> '06:32'（本地时区，Open-Meteo 已按 timezone 返回）。"""
+        if not iso:
+            return None
+        return str(iso)[11:16]
+
     rows = []
     for r in results:
+        daily = r.get("daily") or {}
         for window, f in (r.get("windows") or {}).items():
             score = f.get("final")
+            xc = f.get("xcheck") or {}
             rows.append({
                 "city": city, "date": r["date"], "window": window,
                 "score": score,
@@ -335,6 +402,15 @@ def save_daily_results(cfg, results, city):
                 "model_prob": f.get("prob"),
                 "aod": f.get("aod"),
                 "pm2_5": f.get("pm2_5"),
+                "chroma": f.get("chroma"),
+                "spread": xc.get("spread"),
+                "visibility": f.get("visibility"),
+                "sunrise": _hhmm(daily.get("sunrise")),
+                "sunset": _hhmm(daily.get("sunset")),
+                "tmax": daily.get("tmax"),
+                "tmin": daily.get("tmin"),
+                "precip_sum": daily.get("precip_sum"),
+                "precip_prob": daily.get("precip_prob"),
                 "source": "daily",
             })
     return upsert_predictions(cfg, rows)

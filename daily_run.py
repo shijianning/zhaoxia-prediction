@@ -50,6 +50,22 @@ def main():
 
     cfg = load_config()
 
+    from src import logger as log_mod
+    log = log_mod.setup_logging(cfg)
+    log.info("===== daily_run 开始（predict_only=%s）=====", args.predict_only)
+
+    try:
+        _run(cfg, args)
+        log.info("===== daily_run 完成 =====")
+    except Exception as exc:
+        log.exception("daily_run 运行失败")
+        _alert_failure(cfg, exc)
+        print(f"[错误] 运行失败：{exc}，详见 output/logs/run.log")
+        return 1
+    return 0
+
+
+def _run(cfg, args):
     train_result = None
     if not args.predict_only:
         try:
@@ -76,6 +92,16 @@ def main():
     if notify_msg:
         print(notify_msg)
     print("用浏览器打开该文件即可查看。")
+
+
+def _alert_failure(cfg, exc):
+    from src import notify
+    try:
+        msg = notify.send_failure_alert(cfg, exc)
+        if msg:
+            print(msg)
+    except Exception:
+        pass
 
 
 def _save_to_db(cfg, results, meta):

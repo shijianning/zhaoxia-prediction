@@ -167,9 +167,9 @@ date,window,glow,source,note
 
 ### 星图云第三方对比（第 4 方，可选）
 
-在 `config.yaml` 的 `third_party.geovisearth` 填入 token 后即可把星图云官方预报作为第 4 个对比源：
+在 `config.yaml` 的 `third_party.geovisearth` 填入 token 后即可把星图云官方预报作为第 4 个对比源（火烧云点查询预报，返回未来 3 天日出/日落时刻的火烧云质量与等级）：
 
-1. 到 <https://open.geovisearth.com> 注册并完成开发者认证，在「火烧云预报 API」下单/开通；
+1. 到 <https://open.geovisearth.com> 注册并完成开发者认证，在「火烧云特色预报」下单/开通；
 2. 在控制台创建应用、获取 token；
 3. 编辑 `config.yaml`：
 
@@ -178,17 +178,16 @@ third_party:
   geovisearth:
     enabled: true
     token: "你的token"
-    base_url: "https://api.open.geovisearth.com/v2/glow/fc/idxV2"
-    productCode: "..."   # 控制台开通接口后获取
-    dataCode: "..."      # 控制台开通接口后获取
-    meteCode: "..."      # 控制台开通接口后获取
+    base_url: "https://api.open.geovisearth.com/v2/grid/glow/day"
+    mete_codes: "glow,aod"   # glow=火烧云质量, aod=蓝天指数
+    level: true
 ```
 
-接入点位于 `src/crosscheck.py` 的 `run_geovisearth_crosscheck()`（已预留调用桩与解析 TODO），主预测 `src/predict.py` 会自动挂载，报告里每个窗口会显示「🌐 星图云官方预报」一行。
+接入点位于 `src/crosscheck.py` 的 `run_geovisearth_crosscheck()`，主预测 `src/predict.py` 会自动挂载，报告里每个窗口会显示「🌐 星图云官方预报」一行。官方接口文档：<https://open.geovisearth.com/support/document?docId=495>（数值→0-100 分的映射为经验式，可在 `src/crosscheck.py::_glow_to_score` 里按实测微调）。
 
 ## 每日天气概览
 
-单城报告的每个日期卡片顶部会显示当天天气概览：**天气现象（☀️晴/⛅多云/☁️阴/🌧️雨…）+ 最高最低温 + 日出日落时间 + 全天降水概率与降水量**。这些数据来自 Open-Meteo 的逐日字段（`weather_code` / `temperature_2m_max/min` / `sunrise` / `sunset` / `precipitation_sum` / `precipitation_probability_max`），与朝霞晚霞评分共用同一次请求，无额外开销。
+单城报告的每个日期卡片顶部会显示当天天气概览：**天气现象（☀️晴/⛅多云/☁️阴/🌧️雨…）+ 最高最低温 + 日出日落时间 + 全天降水概率与降水量**。这些数据来自 Open-Meteo 的逐日字段（`weather_code` / `temperature_2m_max/min` / `sunrise` / `sunset` / `precipitation_sum` / `precipitation_probability_max`），与朝霞晚霞评分共用同一次请求，无额外开销。全国地图点击城市气泡也会展示同样的每日天气。
 
 ## 鲜艳度指数（0-10）
 
@@ -210,10 +209,29 @@ third_party:
 notify:
   enabled: true
   sckey: "SCT你的SendKey"
-  threshold: 70    # 预测分达到该值（对应"大烧"）才推送
+  threshold: 70          # 预测分达到该值（对应"大烧"）才推送
+  morning_threshold: 75  # 可选：朝霞单独阈值
+  evening_threshold: 65  # 可选：晚霞单独阈值（留空则统一用 threshold）
 ```
 
-3. 运行 `python daily_run.py`，若当天最佳窗口达到阈值，会自动收到微信消息（标题 + 日期/时段/评分/鲜艳度指数）。未配置 `sckey` 时静默跳过，不影响预测。免费版每天 5 条推送。
+3. 运行 `python daily_run.py`，若当天最佳窗口达到阈值，会自动收到微信消息（标题 + 日期/时段/评分/鲜艳度指数 + 多模型一致性）。未配置 `sckey` 时静默跳过，不影响预测。免费版每天 5 条推送。
+
+阈值说明：实际推送阈值 = 该时段阈值 + 多模型一致性微调（三模型结论一致时 −5 分更宽松，分歧大时 +5 分更严格）。脚本运行出错时也会推送一次失败告警。
+
+## 回测与阈值校准
+
+`backtest.py` 用 `data/raw/posts.csv` 里的历史观测标签评估当前预测的准确率，并对推送阈值做扫描校准（输出每个阈值的准确率/精确率/召回率/F1，并给出建议阈值）：
+
+```bash
+python backtest.py                 # 默认扫描 45~80 分
+python backtest.py --thresholds 60,65,70,75
+```
+
+在 `data/raw/posts.csv` 补充真实观测（`date,window,glow,source,note`，`glow` 为 1=出霞/0=平淡）后即可回测；标注越多，校准越可靠，形成「预测 → 观测 → 回测 → 再校准」闭环。
+
+## 运行日志
+
+所有脚本会把运行情况写入 `output/logs/run.log`（按天滚动，保留 30 份），同时输出到控制台。定时任务没有可见终端，排查问题时看这个日志即可；脚本失败时还会微信推送一次告警（若已配置推送）。
 
 ## 每天自动运行
 
@@ -240,6 +258,7 @@ zhaoxia-prediction/
 ├── config.yaml           # 配置
 ├── daily_run.py          # 每日入口（单城训练+预测+报告）
 ├── national_map.py       # 全国预测地图入口
+├── backtest.py           # 回测与阈值校准
 ├── run_daily.bat         # Windows 一键运行
 ├── requirements.txt
 ├── data/
@@ -257,11 +276,13 @@ zhaoxia-prediction/
 │   ├── predict.py        # 预测
 │   ├── database.py       # MySQL 存储层
 │   ├── notify.py         # 微信推送(Server酱)
+│   ├── logger.py         # 运行日志
 │   ├── national_map.py   # 全国地图预测/渲染
 │   └── report.py         # HTML 报告
 └── output/
     ├── report.html       # 单城报告
-    └── national_map.html # 全国地图
+    ├── national_map.html # 全国地图
+    └── logs/run.log      # 运行日志
 ```
 
 ## 部署到自己的服务器

@@ -6,9 +6,13 @@
 
 这是"用不同预测程序互相印证"的免费实现（无需 API Key）。
 """
+import datetime as dt
+
+import requests
+
 from . import weather
 from .features import extract_day_features
-from .glow_rules import grade_of, rule_score
+from .glow_rules import grade_of, rule_score, vividness_of
 
 # 三个来自不同国家气象机构的独立全球模式（云量数据经实测均可用）
 CROSSCHECK_MODELS = ["gfs_global", "icon_global", "gem_global"]
@@ -47,41 +51,119 @@ def confidence_of(spread):
 
 
 def run_geovisearth_crosscheck(cfg, days=None):
-    """第 4 方第三方对比：星图云(GeoVisEarth)官方「火烧云预报API」。
+    """第 4 方第三方对比：星图云(GeoVisEarth)官方「火烧云点查询预报」API。
 
-    这是对 SunsetBot / 莉景天气 这类「无公开 API」小程序的最佳替代：
-    星图云开放平台提供官方朝霞/晚霞预报接口（火烧云质量 + 等级，未来 3 天，
-    每日日出/日落两次），需申请 token。接口文档：
-    https://open.geovisearth.com/support/document?docId=757&detail=client
+    接口：GET https://api.open.geovisearth.com/v2/grid/glow/day
+    文档：https://open.geovisearth.com/support/document?docId=495
+    返回指定经纬度未来 3 天（含当天）日出/日落时刻的火烧云质量与等级、
+    蓝天指数与等级。这是对 SunsetBot / 莉景天气 这类「无公开 API」小程序的
+    最佳官方替代数据源。
 
-    当前为「占位桩」：未在 config.yaml 填入 token 与 productCode/dataCode/meteCode
-    时直接返回空 dict（不参与对比）；填入并 enabled=true 后，在下方 TODO 处
-    按官方返回结构解析「火烧云等级」，映射为 0-100 分挂到报告上。
-
-    返回 {(date, window): info}，与 run_crosscheck 结构一致。
+    未在 config 填入 token / enabled=false 时直接返回空 dict（不参与对比）。
+    返回 {(date, window): {score, grade, quality, level}}，与 run_crosscheck 结构一致；
+    score 已映射为 0-100 分，便于直接挂到报告上。
     """
     gv = (cfg.get("third_party") or {}).get("geovisearth") or {}
     if not gv.get("enabled") or not gv.get("token"):
         return {}
-    token = gv["token"]
-    base_url = gv.get("base_url", "https://api.open.geovisearth.com/v2/glow/fc/idxV2")
-    product_code = gv.get("productCode", "")
-    data_code = gv.get("dataCode", "")
-    mete_code = gv.get("meteCode", "")
 
-    if not (product_code and data_code and mete_code):
-        # 参数不全，视为未启用（避免发出必错请求）
+    token = gv["token"]
+    base_url = gv.get(
+        "base_url", "https://api.open.geovisearth.com/v2/grid/glow/day"
+    )
+    mete_codes = gv.get("mete_codes", "glow,aod")
+    want_level = bool(gv.get("level", True))
+
+    city = cfg["city"]
+    days = days or cfg["forecast"]["days"]
+
+    # 时间范围：今天 00 时 ~ (今天 + days) 23 时，格式 yyyyMMddHH
+    today = dt.date.today()
+    start_str = today.strftime("%Y%m%d") + "00"
+    end_str = (today + dt.timedelta(days=days)).strftime("%Y%m%d") + "23"
+
+    params = {
+        "location": f"{city['longitude']},{city['latitude']}",  # 经度,纬度
+        "start": start_str,
+        "end": end_str,
+        "meteCodes": mete_codes,
+        "level": "true" if want_level else "false",
+        "token": token,
+    }
+
+    try:
+        resp = requests.get(base_url, params=params, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
         return {}
 
-    # TODO(星图云接入点)：此处用 requests 调用 base_url，携带 token 与上述三个
-    # 产品参数，解析返回的火烧云等级（如 优质大烧/大烧/中烧/小烧/微烧 或数值等级），
-    # 映射到 0-100 分，再按 (date, window) 组织成：
-    #   {(date, window): {"geovisearth": score, "grade": "...", "quality": "..."}}
-    # 示例请求参数（以官方文档为准）：
-    #   params = {"token": token, "productCode": product_code,
-    #             "dataCode": data_code, "meteCode": mete_code,
-    #             "start": start_date, "end": end_date}
-    return {}
+    if payload.get("status") != 0:
+        return {}
+
+    result = payload.get("result") or {}
+    mete_codes_list = result.get("meteCodes") or []
+    datas = result.get("datas") or []
+
+    # 找到 glow（火烧云质量）在 meteCodes 里的下标
+    try:
+        glow_idx = mete_codes_list.index("glow")
+    except ValueError:
+        return {}
+
+    out = {}
+    for item in datas:
+        fc_time = item.get("fc_time") or ""
+        if not fc_time:
+            continue
+        # fc_time 形如 "2026-09-20 06:30:00"（本地时区）
+        date = fc_time[:10]
+        hour = int(fc_time[11:13]) if len(fc_time) >= 13 else 12
+        window = "morning" if hour < 12 else "evening"
+
+        values = item.get("values") or []
+        levels = item.get("levels") or []
+        glow_val = values[glow_idx] if glow_idx < len(values) else None
+        glow_lv = levels[glow_idx] if glow_idx < len(levels) else None
+
+        score = _glow_to_score(glow_val, glow_lv)
+        if score is None:
+            continue
+        out[(date, window)] = {
+            "score": score,
+            "grade": grade_of(score),
+            "vivid": vividness_of(score),
+            "quality": glow_val,
+            "level": glow_lv,
+        }
+    return out
+
+
+def _glow_to_score(value, level):
+    """把星图云的火烧云质量(value)与等级(level)映射为 0-100 分。
+
+    官方未公开确切的数值标定，这里采用经验映射（可随实测微调）：
+    - value 为火烧云质量，示例中约 0-1；若返回 0-100 则直接使用。
+    - level 为等级（示例 0-6），作为 value 缺失时的兜底。
+    """
+    if value is not None:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            v = None
+        if v is not None:
+            if v <= 1.0:
+                return round(v * 100, 1)
+            return round(v, 1)
+
+    if level is not None:
+        try:
+            lv = int(level)
+        except (TypeError, ValueError):
+            lv = None
+        if lv is not None:
+            return round(min(max(lv, 0), 6) / 6.0 * 100, 1)
+    return None
 
 
 

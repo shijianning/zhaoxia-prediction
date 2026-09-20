@@ -99,6 +99,7 @@ def predict_city(base_cfg, name, lat, lon, days=2):
     cfg = _city_cfg(base_cfg, name, lat, lon, days)
     data = weather.get_forecast(cfg)
     day_feats = feat_mod.extract_day_features(data)
+    daily_wx = feat_mod.extract_daily_weather(data)
 
     try:
         aq = weather.get_air_quality(cfg)
@@ -115,6 +116,9 @@ def predict_city(base_cfg, name, lat, lon, days=2):
             "vivid": vividness_of(score),
             "grade": grade_of(score),
         }
+    # 每日天气概览（日出日落/温度/降雨），供地图气泡展示
+    for date, wx in daily_wx.items():
+        result.setdefault(date, {})["daily"] = wx
     return result
 
 
@@ -487,11 +491,38 @@ __TMAP_SCRIPT__
       if (!w) return '<span style="color:#94a3b8">暂无</span>';
       return w.score + ' 分 · ' + w.vivid;
     };
+    const dw = d && d.daily ? d.daily : null;
+    let wxLine = '';
+    if (dw) {
+      wxLine = '<div class="row"><span class="k">天气</span><span class="val">' + dailyLine(dw) + '</span></div>';
+    }
     return '<div class="iw"><h3>' + c.name + (c.major ? ' <span style="font-size:11px;color:#f97316;">省会</span>' : '') + '</h3>' +
       '<div style="font-size:11px;color:#94a3b8;">' + DATES[curDateIdx] + '</div>' +
       '<div class="row"><span class="k">朝霞 🌅</span><span class="val">' + fmt(m) + '</span></div>' +
       '<div class="row"><span class="k">晚霞 🌇</span><span class="val">' + fmt(e) + '</span></div>' +
+      wxLine +
       '</div>';
+  }
+
+  // WMO 天气码 -> 中文+emoji（与单城报告一致）
+  const WX = {0:'☀️晴',1:'🌤️大致晴',2:'⛅多云',3:'☁️阴',45:'🌫️雾',48:'🌫️雾凇',
+    51:'🌦️小毛毛雨',53:'🌦️毛毛雨',55:'🌧️大毛毛雨',61:'🌦️小雨',63:'🌧️中雨',65:'🌧️大雨',
+    66:'🌧️冻雨',67:'🌧️强冻雨',71:'🌨️小雪',73:'🌨️中雪',75:'❄️大雪',77:'🌨️米雪',
+    80:'🌦️阵雨',81:'🌧️强阵雨',82:'⛈️暴雨',85:'🌨️阵雪',86:'❄️强阵雪',
+    95:'⛈️雷暴',96:'⛈️雷暴冰雹',99:'⛈️强雷暴冰雹'};
+  function wxText(code) { return WX[code] || '🌡️未知'; }
+  function hhmm(iso) { return iso ? String(iso).slice(11, 16) : '--:--'; }
+  function num(v, unit) { return (v === null || v === undefined) ? '--' : (Math.round(v * 10) / 10) + unit; }
+  function dailyLine(dw) {
+    let s = wxText(dw.code);
+    if (dw.tmax !== null && dw.tmin !== null && dw.tmax !== undefined && dw.tmin !== undefined) {
+      s += ' ' + Math.round(dw.tmin) + '~' + Math.round(dw.tmax) + '℃';
+    }
+    s += ' · 🌅' + hhmm(dw.sunrise) + ' 🌇' + hhmm(dw.sunset);
+    if (dw.precip_sum !== null && dw.precip_sum !== undefined && dw.precip_sum > 0) {
+      s += ' · 💧' + num(dw.precip_sum, 'mm');
+    }
+    return s;
   }
 
   markers.on('click', function (e) {

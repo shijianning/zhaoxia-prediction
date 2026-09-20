@@ -27,17 +27,17 @@ data:
   history_days: 120                 # 训练时回溯的历史天气天数
 
 # 第三方数值对比源（可选）
-# 星图云(GeoVisEarth)开放平台提供官方「火烧云预报API」，返回朝霞/晚霞质量与等级，
-# 是最直接的可对比数据源。需在 https://open.geovisearth.com 注册并申请 token（付费/配额）。
+# 星图云(GeoVisEarth)开放平台提供官方「火烧云点查询预报API」，返回指定经纬度
+# 未来3天日出/日落时刻的火烧云质量与等级，是最直接的可对比数据源。
+# 需在 https://open.geovisearth.com 注册并申请 token（付费/配额）。
+# 接口文档：https://open.geovisearth.com/support/document?docId=495
 third_party:
   geovisearth:
     enabled: false   # 填入 token 并改为 true 后，交叉验证会自动加入第 4 方对比
     token: ""        # 星图云控制台申请的火烧云预报 API token
-    base_url: "https://api.open.geovisearth.com/v2/glow/fc/idxV2"
-    # 以下三个参数需在星图云控制台开通「火烧云预报」接口后，从开发文档/控制台获取：
-    productCode: ""
-    dataCode: ""
-    meteCode: ""
+    base_url: "https://api.open.geovisearth.com/v2/grid/glow/day"
+    mete_codes: "glow,aod"   # glow=火烧云质量, aod=蓝天指数（要素代码，逗号分隔）
+    level: true              # 是否同时返回数据等级
 
 output:
   dir: "output"
@@ -69,3 +69,7 @@ notify:
   enabled: false
   sckey: ""          # Server酱 SendKey，在 https://sct.ftqq.com 登录后获取
   threshold: 70      # 预测分达到该值（对应"大烧"）才推送
+  # 可选：朝霞/晚霞分别设阈值（留空则统一用上面的 threshold）。
+  # 实际推送阈值还会结合多模型一致性 ±5 分动态微调（结论一致→更宽松，分歧大→更严格）。
+  morning_threshold: null
+  evening_threshold: null

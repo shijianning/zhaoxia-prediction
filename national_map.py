@@ -29,6 +29,24 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config()
+
+    from src import logger as log_mod
+    log = log_mod.setup_logging(cfg)
+    log.info("===== national_map 开始（cities=%s, workers=%s, days=%s）=====",
+             args.cities or "全部", args.workers, args.days)
+
+    try:
+        _run(cfg, args)
+        log.info("===== national_map 完成 =====")
+        return 0
+    except Exception as exc:
+        log.exception("national_map 运行失败")
+        _alert_failure(cfg, exc)
+        print(f"[错误] 运行失败：{exc}，详见 output/logs/run.log")
+        return 1
+
+
+def _run(cfg, args):
     cities = national_map.load_cities()
     if args.cities and args.cities > 0:
         cities = cities[: args.cities]
@@ -37,10 +55,10 @@ def main():
         results, failures = national_map.load_cache(cfg)
         if results is None:
             print("没有缓存，请先完整运行一次 `python national_map.py`。")
-            return 1
+            return
         path = national_map.save_national_map(cfg, cities, results, failures, days=args.days)
         print(f"已从缓存重新渲染：{path}")
-        return 0
+        return
 
     print(f"开始预测 {len(cities)} 个城市的朝霞/晚霞（并发 {args.workers}）...")
     results, failures = national_map.run_national(
@@ -61,6 +79,16 @@ def main():
     print(db_note)
     print(f"\n地图已生成：{path}")
     print("用浏览器打开该文件即可查看全国朝霞晚霞预测地图。")
+
+
+def _alert_failure(cfg, exc):
+    from src import notify
+    try:
+        msg = notify.send_failure_alert(cfg, exc)
+        if msg:
+            print(msg)
+    except Exception:
+        pass
 
 
 def _save_to_db(cfg, results):

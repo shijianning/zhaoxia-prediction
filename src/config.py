@@ -32,10 +32,9 @@ DEFAULTS = {
         "geovisearth": {
             "enabled": False,
             "token": "",
-            "base_url": "https://api.open.geovisearth.com/v2/glow/fc/idxV2",
-            "productCode": "",
-            "dataCode": "",
-            "meteCode": "",
+            "base_url": "https://api.open.geovisearth.com/v2/grid/glow/day",
+            "mete_codes": "glow,aod",
+            "level": True,
         },
     },
     "database": {
@@ -50,6 +49,8 @@ DEFAULTS = {
         "enabled": False,
         "sckey": "",
         "threshold": 70,
+        "morning_threshold": None,
+        "evening_threshold": None,
     },
     "output": {
         "dir": "output",

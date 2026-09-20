@@ -20,17 +20,28 @@ if errorlevel 1 (
 )
 
 REM ---- 1) Locate or auto-install Python ----
-set "PY="
-python --version >nul 2>&1 && set "PY=python"
-if not defined PY if exist "%ProgramFiles%\Python312\python.exe" set "PY=%ProgramFiles%\Python312\python.exe"
-if not defined PY if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY=%LocalAppData%\Programs\Python\Python312\python.exe"
+set "PYCMD="
 
-if not defined PY (
-    echo [1/6] Python not found. Downloading Python 3.12.7 ...
-    curl -L --retry 2 -o "%TEMP%\python-3.12.7-amd64.exe" "https://mirrors.huaweicloud.com/python/3.12.7/python-3.12.7-amd64.exe"
+REM (a) python already on PATH
+python --version >nul 2>&1 && set "PYCMD=python"
+
+REM (b) py launcher (python.org installer always registers it) -> resolve real exe
+if not defined PYCMD py -3 --version >nul 2>&1 && for /f "delims=" %%i in ('py -3 -c "import sys;print(sys.executable)"') do set "PYCMD=%%i"
+
+REM (c) scan common per-user / per-machine install dirs (3.10 ~ 3.13)
+if not defined PYCMD (
+    for %%V in (313 312 311 310) do (
+        if not defined PYCMD if exist "%LocalAppData%\Programs\Python\Python%%V\python.exe" set "PYCMD=%LocalAppData%\Programs\Python\Python%%V\python.exe"
+        if not defined PYCMD if exist "%ProgramFiles%\Python%%V\python.exe" set "PYCMD=%ProgramFiles%\Python%%V\python.exe"
+    )
+)
+
+if not defined PYCMD (
+    echo [1/6] Python not found. Downloading Python 3.12 ...
+    curl -L --retry 2 -o "%TEMP%\python-3.12.10-amd64.exe" "https://mirrors.huaweicloud.com/python/3.12.10/python-3.12.10-amd64.exe"
     if errorlevel 1 (
         echo         Huawei mirror failed, trying python.org ...
-        curl -L --retry 2 -o "%TEMP%\python-3.12.7-amd64.exe" "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
+        curl -L --retry 2 -o "%TEMP%\python-3.12.10-amd64.exe" "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
     )
     if errorlevel 1 (
         echo [ERROR] Cannot download Python. Check internet / firewall.
@@ -39,26 +50,26 @@ if not defined PY (
         exit /b 1
     )
     echo         Installing Python silently (1-2 min) ...
-    "%TEMP%\python-3.12.7-amd64.exe" /quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_test=0
+    "%TEMP%\python-3.12.10-amd64.exe" /quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_test=0
     timeout /t 5 >nul
-    set "PY=%ProgramFiles%\Python312\python.exe"
-    if not exist "%PY%" set "PY=%LocalAppData%\Programs\Python\Python312\python.exe"
-    if not exist "%PY%" (
+    set "PYCMD=%ProgramFiles%\Python312\python.exe"
+    if not exist "%PYCMD%" set "PYCMD=%LocalAppData%\Programs\Python\Python312\python.exe"
+    if not exist "%PYCMD%" (
         echo [ERROR] Python install failed. Install manually.
         pause
         exit /b 1
     )
 )
 echo [1/6] Python OK:
-"%PY%" --version
+"%PYCMD%" --version
 
 REM ---- 2) dependencies (Tsinghua mirror for China servers) ----
 echo.
 echo [2/6] Installing dependencies ...
-"%PY%" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+"%PYCMD%" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 if errorlevel 1 (
     echo [WARN] Some packages failed. Retrying without mirror ...
-    "%PY%" -m pip install -r requirements.txt
+    "%PYCMD%" -m pip install -r requirements.txt
 )
 
 REM ---- 3) local config ----
@@ -72,10 +83,10 @@ if not exist config.local.yaml (
 REM ---- 4) first run ----
 echo.
 echo [3/6] Generating single-city report ...
-"%PY%" daily_run.py --predict-only
+"%PYCMD%" daily_run.py --predict-only
 echo.
 echo [4/6] Generating national map ...
-"%PY%" national_map.py
+"%PYCMD%" national_map.py
 
 REM ---- 5) entry page ----
 if exist site_index.html copy /y site_index.html output\index.html >nul
@@ -91,7 +102,7 @@ echo         - ZhaoxiaWeb   : on system start (web server)
 REM ---- 7) start web now ----
 echo.
 echo [6/6] Starting web server now ...
-start "zhaoxia-report" cmd /k "\"%PY%\" -m http.server 8080 --directory output"
+start "zhaoxia-report" cmd /k "%PYCMD% -m http.server 8080 --directory output"
 
 echo.
 echo ==============================================

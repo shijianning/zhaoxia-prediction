@@ -23,6 +23,31 @@ def _is_clearly_bad(f):
     return f["precip"] >= 0.5 or f["cloud_cover"] >= 95
 
 
+def load_labels(cfg):
+    """统一训练标签真源，避免 CSV 与 MySQL 双源漂移。
+
+    约定：`data/raw/posts.csv` 为标签真源（可进 git、可手动编辑）；
+    MySQL `posts` 表仅作镜像。加载流程：
+      1. 读 CSV（真源）；
+      2. 若 MySQL 可用，先把 CSV 同步进表（CSV -> 表）；
+      3. 再读表，把「表里有、CSV 没有」的标注合并进来（表 -> 内存），
+         保证两端都不丢数据。MySQL 不可用时静默回退到仅 CSV。
+    """
+    posts = posts_mod.load_posts(cfg["data"]["posts_csv"])
+    seen = {(p["date"], p["window"]) for p in posts}
+    try:
+        from . import database
+        database.sync_posts_from_csv(cfg)  # CSV -> 表（真源优先）
+        for p in database.load_posts(cfg):
+            key = (p["date"], p["window"])
+            if key not in seen:
+                posts.append(p)
+                seen.add(key)
+    except Exception:
+        pass
+    return posts
+
+
 def build_training_rows(cfg):
     """组装训练样本（特征 + glow 标签 + 来源）。"""
     history_days = cfg["data"]["history_days"]
@@ -44,8 +69,8 @@ def build_training_rows(cfg):
         f["rule_score"], _ = rule_score(f)
         f["date"], f["window"] = key
 
-    # 帖子标注
-    posts = posts_mod.load_posts(cfg["data"]["posts_csv"])
+    # 帖子标注（统一真源：CSV 为准 + MySQL 镜像合并）
+    posts = load_labels(cfg)
     post_map = {(p["date"], p["window"]): p["glow"] for p in posts}
 
     rows = []

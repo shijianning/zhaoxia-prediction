@@ -5,7 +5,8 @@
 
 特征向量（与特征工程 + 规则评分一致）：
 [cloud_cover, cloud_low, cloud_mid, cloud_high, humidity, wind,
- precip, temp, day_of_year_sin, day_of_year_cos, rule_score]
+ precip, temp, day_of_year_sin, day_of_year_cos, rule_score,
+ visibility, aod]
 """
 import os
 
@@ -19,8 +20,18 @@ from sklearn.preprocessing import StandardScaler
 
 
 def feature_vector(f):
-    """把特征字典转换为模型输入向量。"""
+    """把特征字典转换为模型输入向量。
+
+    新增 visibility / aod 两维，让模型直接学习「大气通透度」对出霞的影响
+    （规则引擎只把这两者压成一个 rule_score 标量，模型此前学不到细分贡献）。
+    缺失时用中性值填充，避免被当成"极差通透"而误判：
+    - 能见度 10km、AOD 0.3 约等于规则引擎的中性分（不奖励也不惩罚）。
+    """
     doy = float(f.get("day_of_year", 1))
+    vis = f.get("visibility")
+    aod = f.get("aod")
+    vis_val = float(vis) if vis is not None else 10000.0
+    aod_val = float(aod) if aod is not None else 0.3
     return [
         float(f.get("cloud_cover", 0.0)),
         float(f.get("cloud_low", 0.0)),
@@ -33,6 +44,8 @@ def feature_vector(f):
         float(np.sin(2 * np.pi * doy / 365.0)),
         float(np.cos(2 * np.pi * doy / 365.0)),
         float(f.get("rule_score", 0.0)),
+        vis_val,
+        aod_val,
     ]
 
 
