@@ -5,12 +5,46 @@
 设计要点：
 - 所有函数在 MySQL 未启动 / 未配置 / 连接失败时都优雅降级（返回 None/False/空），
   绝不影响主预测流程（预测仍会照常生成 HTML 报告）。
+- **降级但不静默**：每个 except 都会经 `_log_warn()` 写一条 warning 到统一日志。
+  定时任务没有可见终端，日志文件是排查问题的唯一依据；从前"无声失败"的写法
+  会让 MySQL 挂掉表现为"分数莫名变低"。
 - 表结构：
     cities        城市列表（name 唯一）
-    predictions   每日朝霞/晚霞预测历史（city,date,window 唯一，幂等 upsert）
+    predictions   每日朝霞/晚霞预测历史（city,date,window,source 唯一，幂等 upsert）
     posts         训练观测标注（帖子）
+
+**单位约定（易踩坑）**：
+- `visibility` 列存**米**（与 Open-Meteo 原始输出一致），报告展示时才除以 1000；
+- `chroma` 为 0-10 的鲜艳度指数；`score`/`rule_score` 为 0-100 分；
+- `spread` 为多模型交叉验证的极差（0-100 分）。
 """
 import datetime as dt
+import re
+
+# SQL 标识符白名单：库名/列名虽来自本地配置，仍不应直接拼进 SQL
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+
+def _log_warn(msg, exc=None):
+    """降级时留痕。logger 未初始化时也不会抛异常。"""
+    try:
+        from .logger import get_logger
+        log = get_logger()
+        if exc is None:
+            log.warning(msg)
+        else:
+            log.warning("%s: %s", msg, exc)
+    except Exception:
+        pass
+
+
+def _safe_ident(name, what="标识符"):
+    """校验 SQL 标识符（库名/表名/列名），非法则抛 ValueError。"""
+    s = str(name)
+    if not _IDENT_RE.match(s):
+        raise ValueError(f"非法的 {what}: {s!r}（只允许字母/数字/下划线，长度 1-64）")
+    return s
+
 
 DEFAULT_DB = {
     "enabled": True,
@@ -48,7 +82,7 @@ _SCHEMA = [
         pm2_5 DOUBLE DEFAULT NULL,
         chroma DOUBLE DEFAULT NULL,
         `spread` DOUBLE DEFAULT NULL,
-        visibility DOUBLE DEFAULT NULL,
+        visibility DOUBLE DEFAULT NULL,   -- 单位：米
         sunrise VARCHAR(8) DEFAULT NULL,
         sunset VARCHAR(8) DEFAULT NULL,
         tmax DOUBLE DEFAULT NULL,
@@ -113,7 +147,8 @@ def is_available(cfg):
         conn = connect_server(cfg)
         conn.close()
         return True
-    except Exception:
+    except Exception as exc:
+        _log_warn("MySQL 探活失败", exc)
         return False
 
 
@@ -121,15 +156,22 @@ def init_schema(cfg):
     """创建数据库 + 三张表（幂等）。返回 True/False。"""
     d = db_conf(cfg)
     try:
+        dbname = _safe_ident(d["database"], "数据库名")
+    except ValueError as exc:
+        _log_warn("数据库名非法，跳过初始化", exc)
+        return False
+
+    try:
         # 先连到无库连接，建库
         conn = connect_server(cfg)
         with conn.cursor() as cur:
             cur.execute(
                 "CREATE DATABASE IF NOT EXISTS `%s` "
-                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" % d["database"]
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" % dbname
             )
         conn.close()
-    except Exception:
+    except Exception as exc:
+        _log_warn("建库失败（MySQL 未启动或权限不足），跳过入库", exc)
         return False
 
     try:
@@ -141,7 +183,8 @@ def init_schema(cfg):
         # 老库升级：为 predictions 表补上后来新增的列（幂等）
         _migrate_predictions(cfg)
         return True
-    except Exception:
+    except Exception as exc:
+        _log_warn("建表失败", exc)
         return False
 
 
@@ -169,11 +212,13 @@ def _migrate_predictions(cfg):
             for col, coldef in _PREDICTIONS_NEW_COLUMNS:
                 if col not in existing:
                     cur.execute(
-                        "ALTER TABLE predictions ADD COLUMN `%s` %s" % (col, coldef)
+                        "ALTER TABLE predictions ADD COLUMN `%s` %s"
+                        % (_safe_ident(col, "列名"), coldef)
                     )
         conn.close()
         return True
-    except Exception:
+    except Exception as exc:
+        _log_warn("predictions 表结构升级失败", exc)
         return False
 
 
@@ -194,7 +239,8 @@ def upsert_cities(cfg, cities):
                 )
         conn.close()
         return True
-    except Exception:
+    except Exception as exc:
+        _log_warn("写入城市列表失败", exc)
         return False
 
 
@@ -207,7 +253,8 @@ def load_cities(cfg):
             rows = cur.fetchall()
         conn.close()
         return [{"name": r[0], "lat": r[1], "lon": r[2], "major": bool(r[3])} for r in rows]
-    except Exception:
+    except Exception as exc:
+        _log_warn("读取城市列表失败", exc)
         return []
 
 
@@ -215,7 +262,7 @@ def load_cities(cfg):
 # 预测历史
 # ---------------------------------------------------------------------------
 def upsert_predictions(cfg, rows):
-    """批量写入预测记录（city,date,window 唯一，重复则覆盖）。
+    """批量写入预测记录（city,date,window,source 唯一，重复则覆盖）。
 
     rows: 列表，每项 dict，字段：
         city / date / window / score（必填）
@@ -257,7 +304,8 @@ def upsert_predictions(cfg, rows):
                 )
         conn.close()
         return True
-    except Exception:
+    except Exception as exc:
+        _log_warn("写入预测历史失败", exc)
         return False
 
 
@@ -270,7 +318,8 @@ def count_predictions(cfg):
             n = cur.fetchone()[0]
         conn.close()
         return n
-    except Exception:
+    except Exception as exc:
+        _log_warn("统计预测条数失败", exc)
         return None
 
 
@@ -281,10 +330,6 @@ def sync_posts_from_csv(cfg):
     """把 data/raw/posts.csv 同步进 posts 表（追加，不删旧）。"""
     import csv
     import os
-    try:
-        from .config import BASE_DIR
-    except Exception:
-        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     csv_path = cfg["data"]["posts_csv"]
     if not os.path.exists(csv_path):
         return False
@@ -294,9 +339,13 @@ def sync_posts_from_csv(cfg):
         for r in reader:
             if not r.get("date") or not r.get("window"):
                 continue
+            try:
+                glow = int(r.get("glow", 0))
+            except (TypeError, ValueError):
+                continue
             rows.append({
                 "date": r["date"], "window": r["window"],
-                "glow": int(r.get("glow", 0)),
+                "glow": glow,
                 "source": r.get("source") or "manual",
                 "note": r.get("note"),
             })
@@ -321,7 +370,8 @@ def insert_posts(cfg, posts):
                 )
         conn.close()
         return True
-    except Exception:
+    except Exception as exc:
+        _log_warn("写入训练标注失败", exc)
         return False
 
 
@@ -341,7 +391,8 @@ def load_posts(cfg):
             }
             for r in rows
         ]
-    except Exception:
+    except Exception as exc:
+        _log_warn("读取训练标注失败", exc)
         return []
 
 

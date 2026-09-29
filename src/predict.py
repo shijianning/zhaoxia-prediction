@@ -4,6 +4,7 @@
 """
 from . import crosscheck
 from . import features as feat_mod
+from . import logger as log_mod
 from . import transect
 from . import weather
 from .glow_rules import chroma_index, grade_of, rule_score
@@ -16,6 +17,8 @@ def run_prediction(cfg):
     results: 按日期聚合的列表，每项含 morning/evening 两窗口的评分信息。
     meta: 预测时使用的模型信息。
     """
+    log = log_mod.get_logger()
+
     data = weather.get_forecast(cfg)
     day_feats = feat_mod.extract_day_features(data)
     daily_wx = feat_mod.extract_daily_weather(data)
@@ -24,10 +27,20 @@ def run_prediction(cfg):
     try:
         aq = weather.get_air_quality(cfg)
         feat_mod.add_air_quality(day_feats, aq)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("空气质量(AOD)获取失败，通透度因子将移出加权：%s", exc)
 
+    # 加载模型；并施加真实标签闸门
     model = GlowModel.load(cfg["model"]["model_path"])
+    min_real = int(cfg["model"].get("min_real_labels", 30))
+    model_gated = False
+    if model is not None and getattr(model, "real_labels", 0) < min_real:
+        log.warning(
+            "模型真实观测标注 %s 条 < 门槛 %s 条，本次不启用 ML，退回纯规则评分",
+            getattr(model, "real_labels", 0), min_real,
+        )
+        model = None
+        model_gated = True
 
     # 多模型交叉验证（失败不影响主预测）
     xcheck = crosscheck.run_crosscheck(cfg)
@@ -41,8 +54,11 @@ def run_prediction(cfg):
     if transect.enabled(cfg, "single"):
         try:
             tr_check = transect.compute_transect(cfg, data)
-        except Exception:
+        except Exception as exc:
+            log.warning("太阳方位剖面取数失败，方向性因子移出加权：%s", exc)
             tr_check = {}
+        if not tr_check:
+            log.warning("太阳方位剖面为空（无云量数据或方位计算失败），方向性因子移出加权")
 
     for key, f in day_feats.items():
         tr = tr_check.get(key)
@@ -57,7 +73,7 @@ def run_prediction(cfg):
         if xc is not None:
             f["xcheck"] = xc
 
-        # 基础分：规则分与模型概率各占一半
+        # 基础分：有模型时规则分与模型概率各占一半，否则纯规则分
         if model is not None:
             f["prob"] = model.predict_proba(f)
             base = 0.5 * f["rule_score"] + 0.5 * f["prob"] * 100
@@ -99,5 +115,9 @@ def run_prediction(cfg):
         "city": cfg["city"]["name"],
         "has_model": model is not None,
         "model_type": cfg["model"]["type"] if model is not None else None,
+        # 是否因"真实标注不足"被闸门拦下（报告里据此说明为何是纯规则模式）
+        "model_gated": model_gated,
+        "model_real_labels": getattr(model, "real_labels", None) if model is not None else None,
+        "min_real_labels": min_real,
     }
     return results, meta

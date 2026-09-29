@@ -26,6 +26,8 @@ def main():
                         help="预测未来几天")
     parser.add_argument("--render-only", action="store_true",
                         help="从缓存重新渲染地图，不重新拉取数据")
+    parser.add_argument("--resume", action="store_true",
+                        help="跳过今天缓存里已成功的城市，只跑剩余城市（用于分批补齐）")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -56,26 +58,48 @@ def _run(cfg, args):
         if results is None:
             print("没有缓存，请先完整运行一次 `python national_map.py`。")
             return
-        path = national_map.save_national_map(cfg, cities, results, failures, days=args.days)
+        path = national_map.save_national_map(cfg, cities, results, failures or {}, days=args.days)
         print(f"已从缓存重新渲染：{path}")
         return
 
-    print(f"开始预测 {len(cities)} 个城市的朝霞/晚霞（并发 {args.workers}）...")
+    todo = cities
+    if args.resume:
+        have = national_map.cached_city_names(cfg)
+        todo = [c for c in cities if c["name"] not in have]
+        print(f"--resume：今天缓存里已有 {len(have)} 城，本次只跑剩余 {len(todo)} 城。")
+        if not todo:
+            results, failures = national_map.load_cache(cfg)
+            path = national_map.save_national_map(cfg, cities, results or {}, failures or {},
+                                                  days=args.days)
+            print(f"全部城市均已有缓存，直接重绘：{path}")
+            return
+
+    print(f"开始预测 {len(todo)} 个城市的朝霞/晚霞（并发 {args.workers}）...")
     results, failures = national_map.run_national(
-        cfg, cities, days=args.days, workers=args.workers, progress=_progress
+        cfg, todo, days=args.days, workers=args.workers, progress=_progress
     )
 
+    # 与今天的旧缓存合并：若本轮被限流熔断提前收尾，可稍后用 --resume 补齐
     national_map.save_cache(cfg, results, failures)
-    path = national_map.save_national_map(cfg, cities, results, failures, days=args.days)
+    all_results, all_failures = national_map.load_cache(cfg)
+    all_results = all_results or {}
+    all_failures = all_failures or {}
+
+    path = national_map.save_national_map(cfg, cities, all_results, all_failures, days=args.days)
 
     # 写入本地 MySQL（未启动则自动跳过）
-    db_note = _save_to_db(cfg, results)
+    db_note = _save_to_db(cfg, all_results)
 
     print("-" * 56)
-    print(f"成功 {len(results)} 城，失败 {len(failures)} 城")
-    if failures:
-        for name, msg in list(failures.items())[:10]:
+    print(f"本轮成功 {len(results)} 城；合并缓存后共 {len(all_results)} 城有数据，"
+          f"{len(all_failures)} 城仍缺")
+    if all_failures:
+        for name, msg in list(all_failures.items())[:10]:
             print(f"  ✗ {name}: {msg}")
+        if len(all_failures) > 10:
+            print(f"  ... 另有 {len(all_failures) - 10} 城")
+        print("  提示：等 Open-Meteo 配额恢复后运行 "
+              "`python national_map.py --resume` 只补剩余城市。")
     print(db_note)
     print(f"\n地图已生成：{path}")
     print("用浏览器打开该文件即可查看全国朝霞晚霞预测地图。")

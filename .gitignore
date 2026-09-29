@@ -4,6 +4,7 @@ __pycache__/
 venv/
 data/model/
 data/model_backup_*/
+data/horizon/
 output/
 *.joblib
 .DS_Store

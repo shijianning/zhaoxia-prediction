@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import features as feat_mod
+from . import logger as log_mod
 from . import transect
 from . import weather
 from .glow_rules import grade_of, rule_score, vividness_of
@@ -98,6 +99,7 @@ def predict_city(base_cfg, name, lat, lon, days=2):
     全国地图使用「气象规则引擎」评分（与地点无关），不套用仅针对西安训练的 ML 模型。
     """
     cfg = _city_cfg(base_cfg, name, lat, lon, days)
+    log = log_mod.get_logger()
     data = weather.get_forecast(cfg)
     day_feats = feat_mod.extract_day_features(data)
     daily_wx = feat_mod.extract_daily_weather(data)
@@ -105,14 +107,15 @@ def predict_city(base_cfg, name, lat, lon, days=2):
     try:
         aq = weather.get_air_quality(cfg)
         feat_mod.add_air_quality(day_feats, aq)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("[%s] 空气质量(AOD)获取失败，通透度因子移出加权：%s", name, exc)
 
     # 太阳方位剖面（方向性评分）：每城多一次多坐标请求，失败/关闭时自动降级
     if transect.enabled(base_cfg, "national"):
         try:
             tr_check = transect.compute_transect(cfg, data)
-        except Exception:
+        except Exception as exc:
+            log.warning("[%s] 太阳方位剖面取数失败，方向性因子移出加权：%s", name, exc)
             tr_check = {}
         for key, f in day_feats.items():
             tr = tr_check.get(key)
@@ -140,6 +143,9 @@ def predict_city(base_cfg, name, lat, lon, days=2):
             near = tr.get("near_low_cloud")
             if near is not None:
                 bits.append(f"近场低云 {near:.0f}%")
+            terr = tr.get("terrain_deg")
+            if terr is not None and terr > 0.05:
+                bits.append(f"地形仰角 {terr:.1f}°")
             info["dir"] = " · ".join(bits)
         result.setdefault(date, {})[window] = info
     # 每日天气概览（日出日落/温度/降雨），供地图气泡展示
@@ -159,12 +165,18 @@ def run_national(cfg, cities, days=2, workers=8, progress=None, retries=2):
     failures = {}
     pending = list(cities)
     done_base = 0
+    log = log_mod.get_logger()
     for attempt in range(retries + 1):
         if not pending:
             break
         if weather.in_cooldown():
             # 已触发 Open-Meteo 限流：冷却期内重试只会空转（请求会被直接拒绝），
             # 立刻放弃剩余城市，把已成功的部分先落盘，避免整轮白跑。
+            log.warning(
+                "Open-Meteo 限流冷却中（剩余 %.0fs），放弃剩余 %d 城；"
+                "已成功 %d 城将照常落盘",
+                weather.cooldown_remaining(), len(pending), len(results),
+            )
             break
         res, fail = _run_batch(cfg, pending, days, workers,
                                progress=progress, start_done=done_base,
@@ -175,6 +187,9 @@ def run_national(cfg, cities, days=2, workers=8, progress=None, retries=2):
         failures = fail
         if pending and attempt < retries and not weather.in_cooldown():
             time.sleep(2.5)
+    if failures and not weather.in_cooldown():
+        log.warning("本轮 %d 城未取到数据：%s",
+                    len(failures), "、".join(list(failures)[:10]))
     return results, failures
 
 
@@ -298,23 +313,81 @@ def save_national_map(cfg, cities, results, failures, days=2):
     return out_path
 
 
-def save_cache(cfg, results, failures):
-    """把预测结果落盘缓存，便于 --render-only 快速重渲染。"""
-    path = os.path.join(cfg["output"]["dir"], "national_map_cache.json")
+def _cache_path(cfg):
+    return os.path.join(cfg["output"]["dir"], "national_map_cache.json")
+
+
+def save_cache(cfg, results, failures, merge=True):
+    """把预测结果落盘缓存。
+
+    `merge=True` 时与**同一天**的旧缓存合并：已成功的城市被新结果覆盖，
+    旧缓存里其它城市保留下来，失败列表只保留仍未成功的。
+
+    这样做的意义：Open-Meteo 的整点配额可能只够跑一部分城市，熔断后本轮
+    会提前收尾。有了合并语义，就可以用 `--resume` 分批把剩下的城市补齐，
+    而不是每次全量重来（那只会再次撞上限流）。
+
+    跨天的旧缓存**不合并** —— 预测是按日期生成的，昨天的条目留着会让地图
+    显示过期日期。
+    """
+    path = _cache_path(cfg)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    today = dt.date.today().isoformat()
+
+    merged_results = dict(results)
+    merged_failures = dict(failures)
+
+    if merge:
+        old = _load_cache_raw(cfg)
+        if old and old.get("saved_at") == today:
+            combined = dict(old.get("results") or {})
+            combined.update(results)
+            merged_results = combined
+
+            combined_f = dict(old.get("failures") or {})
+            combined_f.update(failures)
+            # 本轮成功的城市，从失败列表里移除
+            for name in results:
+                combined_f.pop(name, None)
+            merged_failures = combined_f
+
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"results": results, "failures": failures}, f, ensure_ascii=False)
+        json.dump({"saved_at": today,
+                   "results": merged_results,
+                   "failures": merged_failures}, f, ensure_ascii=False)
     return path
+
+
+def _load_cache_raw(cfg):
+    path = _cache_path(cfg)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        log_mod.get_logger().warning("读取地图缓存失败：%s", exc)
+        return None
 
 
 def load_cache(cfg):
     """读取缓存，返回 (results, failures)；无缓存时返回 (None, None)。"""
-    path = os.path.join(cfg["output"]["dir"], "national_map_cache.json")
-    if not os.path.exists(path):
+    d = _load_cache_raw(cfg)
+    if not d:
         return None, None
-    with open(path, "r", encoding="utf-8") as f:
-        d = json.load(f)
     return d.get("results"), d.get("failures")
+
+
+def cached_city_names(cfg):
+    """返回缓存里已成功预测的城市名集合（供 --resume 跳过）。"""
+    results, _ = load_cache(cfg)
+    if not results:
+        return set()
+    d = _load_cache_raw(cfg)
+    # 跨天缓存视为过期，不参与跳过
+    if d and d.get("saved_at") != dt.date.today().isoformat():
+        return set()
+    return set(results.keys())
 
 
 _MAP_TEMPLATE = r"""<!DOCTYPE html>
@@ -383,7 +456,26 @@ __TMAP_SCRIPT__
   </div>
 </div>
 <script>
+(function () {
   const CITIES = __CITIES_JSON__;
+
+  // 空态保护：本轮可能因 Open-Meteo 限流（熔断早退）等原因 0 城成功，
+  // 此时 CITIES 是空数组，直接访问 CITIES[0].days 会让整页 JS 崩掉。
+  if (!CITIES.length) {
+    document.getElementById('wrap').innerHTML =
+      '<div style="margin:auto;padding:44px 28px;text-align:center;font-size:14px;color:#475569;max-width:520px;">' +
+      '<div style="font-size:40px;margin-bottom:14px;">&#127787;</div>' +
+      '<div style="font-weight:800;font-size:18px;color:#1e293b;margin-bottom:10px;">本轮没有取到任何城市的数据</div>' +
+      '<div style="line-height:1.9;text-align:left;">' +
+      '最常见的原因是 Open-Meteo 达到了<b>整点调用上限</b>（HTTP 429）。' +
+      '程序检测到限流后会立即停止后续请求，以免把分钟级限流放大成整点封禁。<br><br>' +
+      '可以这样处理：<br>' +
+      '1. 等下一个整点后重跑 <b>python national_map.py</b>；<br>' +
+      '2. 或先用上次缓存重绘地图：<b>python national_map.py --render-only</b>；<br>' +
+      '3. 或减少城市数量：<b>python national_map.py --cities 30</b>。' +
+      '</div></div>';
+    return;
+  }
 
   const DATES = Object.keys(CITIES[0].days).sort();
   let curDateIdx = 0;
@@ -600,6 +692,7 @@ __TMAP_SCRIPT__
   document.querySelector('.date-btn[data-date="0"]').classList.add('active');
   document.querySelector('.win-btn[data-win="evening"]').classList.add('active');
   refresh();
+})();
 </script>
 </body>
 </html>

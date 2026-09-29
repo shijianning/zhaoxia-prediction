@@ -20,21 +20,37 @@ forecast:
 # 朝霞/晚霞是有方向性的光学现象：光来自太阳所在方位，承光"幕布"却在几十到
 # 几百公里之外，而且最壮观的形态来自"云层边缘效应"。本开关打开后，程序会沿
 # 日出/日落方位角拉一条 0~500km 的剖面（早、晚两条射线合并为一次多坐标请求，
-# 仍然免费无 Key），据此计算"剖面云边界"与"太阳方位遮挡"两个新因子。
-# 关闭或取数失败时自动回落到原有 7 因子评分，结果与未启用时一致。
+# 仍然免费无 Key），据此计算「剖面云边界」「太阳方位遮挡」两个因子。
+# 关闭或取数失败时对应因子整体移出加权，不影响其余因子评分。
 transect:
   enabled: true        # 单城报告是否启用（true / false）
   national_map: true   # 全国地图是否同样启用（每城多 1 次请求，被限流可关）
 
+# 地形遮蔽（PVGIS 90m 数字高程的地平线剖面，免费、无需注册）
+# 山区城市太阳方位上的地平线会被山体抬高，可见的低空天空被切掉一块。
+# 地平线是静态地形量，每座城市只算一次并缓存到 cache_dir，之后永久复用。
+horizon:
+  enabled: true
+  cache_dir: "data/horizon"
+
 model:
   type: "logistic"   # 模型类型: logistic(逻辑回归) / rf(随机森林)
-  bootstrap: true    # 无真实标注时，用启发式评分做弱监督预训练
-  min_samples: 30    # 训练样本少于该数时退回纯规则评分模式
+  bootstrap: true    # 是否把弱监督样本也纳入训练集（仅在有真实标签时生效）
+  min_samples: 30    # 训练样本总数少于该数时退回纯规则评分模式
+  # 真实观测标注数量门槛（关键）：低于该值时一律不训练、不启用模型。
+  # 原因：弱监督标签是由规则分 rule_score 生成的确定性函数，用它训练出的
+  # 指标（AUC 接近 1.0）衡量的是"能否复刻规则引擎"，对真实预测没有证据力。
+  # 请在 data/raw/posts.csv 补充真实观测（date,window,glow,source,note）。
+  min_real_labels: 30
+  holdout_ratio: 0.3 # 时序留出比例，留出集只取真实观测样本
   model_path: "data/model/glow_model.joblib"
 
 data:
   posts_csv: "data/raw/posts.csv"   # 帖子观测标注数据(可手动补充)
-  history_days: 120                 # 训练时回溯的历史天气天数
+  # 训练时回溯的历史天数。历史数据走 Open-Meteo 的 Historical Forecast API
+  # （历史预报归档，2021 年起），字段与推理侧的预报逐字段一致，避免 train-serve
+  # skew；同时其回测指标不会像 ERA5 再分析那样因"事后最优"而系统性乐观。
+  history_days: 120
 
 # 第三方数值对比源（可选）
 # 星图云(GeoVisEarth)开放平台提供官方「火烧云点查询预报API」，返回指定经纬度
@@ -58,10 +74,11 @@ output:
 #   步骤：注册并实名/开发者认证 → 控制台「应用管理」→ 创建应用 →
 #         添加 key（勾选「WebServiceAPI / 地图 JavaScript API」）→ 复制 key 填到下面。
 #   重要：申请后需在 key 设置里把「服务器域名/IP」加入「域名白名单」，否则地图会被拒。
-# tmap_key 留空 = 本地开发走代理模式（前端不带 key）；
-# 填了 key = 标准模式（部署到自己服务器用，前端用这个 key 加载地图）。
+#
+# ⚠️ 真实 key 请填写在 config.local.yaml（已被 .gitignore 排除），不要写在这里 ——
+#    本文件会随仓库公开。这里留空即默认走本地代理模式（前端不携带 key）。
 map:
-  tmap_key: "2ERBZ-DDNYN-ZTIFI-SRNLJ-Y6ZJO-CNFXP"
+  tmap_key: ""
 
 # 本地 MySQL 存储（预测历史 / 城市 / 训练标注）
 # 未启动 MySQL 时，程序会自动回退到文件存储，不影响预测。

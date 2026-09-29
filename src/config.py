@@ -18,10 +18,22 @@ DEFAULTS = {
         "timezone": "Asia/Shanghai",
     },
     "forecast": {"days": 7},
+    # 太阳方位剖面（方向性评分）。放在 DEFAULTS 里，保证用户删掉该段时
+    # 行为与默认一致——否则会落到 transect.enabled() 的隐式默认值上。
+    "transect": {"enabled": True, "national_map": True},
+    # 地形遮蔽（PVGIS 地平线 API，无需 key）
+    "horizon": {"enabled": True, "cache_dir": "data/horizon"},
     "model": {
         "type": "logistic",
         "bootstrap": True,
         "min_samples": 30,
+        # 真实观测标注数量下限：低于该值一律不启用 ML，退回纯规则评分。
+        # 弱监督 bootstrap 标签是 rule_score 的确定性函数，用它训练出的模型
+        # 指标（AUC≈1.0）衡量的是"能否复刻规则引擎"，对真实预测没有证据力，
+        # 因此必须有真实标注才允许模型参与打分。
+        "min_real_labels": 30,
+        # 时序留出比例：按日期排序后，末尾该比例作为留出集评估
+        "holdout_ratio": 0.3,
         "model_path": "data/model/glow_model.joblib",
     },
     "data": {
@@ -98,4 +110,5 @@ def load_config(path=None):
     cfg["data"]["posts_csv"] = os.path.join(BASE_DIR, cfg["data"]["posts_csv"])
     cfg["output"]["dir"] = os.path.join(BASE_DIR, cfg["output"]["dir"])
     cfg["output"]["report"] = os.path.join(BASE_DIR, cfg["output"]["report"])
+    cfg["horizon"]["cache_dir"] = os.path.join(BASE_DIR, cfg["horizon"]["cache_dir"])
     return cfg

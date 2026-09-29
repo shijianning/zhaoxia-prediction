@@ -18,17 +18,27 @@
 成本**：Open-Meteo 支持单次请求多个坐标，早、晚两条射线各 17 个点（共 34 点）
 合并成一次调用，仍然是免费无 Key。
 
-产出两个新因子（打分曲线在 glow_rules.py 中，便于统一校准）：
+产出三个新因子（打分曲线在 glow_rules.py 中，便于统一校准）：
 
-- `boundary_score`  剖面云边界：沿太阳方位找到第一处"云量近乎为零"的距离，
+- `boundary_score`     剖面云边界：沿太阳方位找到第一处"云量近乎为零"的距离，
   按经验曲线打分（0km→0、400km→满分、≥500km→0，峰值在 400km）。
-- `block_score`     太阳方位遮挡：0~150km 这段"地平线附近视野"的低云量均值，
+- `block_score`        太阳方位遮挡：0~150km 这段"地平线附近视野"的低云量均值，
   越低越好。比全天空平均低云更贴近真实的遮光效果。
+- `terrain_score`      地形遮蔽：太阳方位上的地平线仰角（PVGIS 90m DEM，见 horizon.py），
+  山区城市西侧群山会把可见的低空天空切掉一块。
+
+同时产出两个**光照几何诊断量**（不参与打分，供报告解释）：
+
+- `light_horizon_km`   阳光与地面相切的距离。日落瞬间约 185km ——
+  比这更近处光线仍在地面之下，那里的云照不到光。这是"近场低云遮挡"
+  取 0~150km 的几何依据。
+- `light_path_km`      剖面各距离处阳光离地的高度。
 
 任何一步失败都返回 `{}`，调用方自动退回原有 7 因子评分，结果与未启用时完全一致。
 """
 
 from . import glow_rules
+from . import horizon
 from . import solar
 from . import weather
 
@@ -159,6 +169,15 @@ def compute_transect(cfg, data, days=None):
     if not azimuths:
         return {}
 
+    # 地形剖面：每城只拉一次（剖面与方位无关，方位只用于插值），
+    # 避免"最先算到的那个窗口"独自承担网络冷启动失败而留下空洞。
+    horizon_profile = None
+    if horizon.enabled(cfg):
+        try:
+            horizon_profile = horizon.fetch_horizon(cfg, lat, lon)
+        except Exception:
+            horizon_profile = None
+
     # ---- 组装两条射线：每个窗口 17 个点，合并为一次请求 ----
     rays = []          # [(window, [距离...])]
     all_lats, all_lons = [], []
@@ -237,6 +256,17 @@ def compute_transect(cfg, data, days=None):
             block_score = glow_rules.azimuth_block_score(near_low)
 
         pos = azimuths.get(window) or {}
+        az_val = pos.get("azimuth")
+        elev_val = pos.get("elevation")
+
+        # 地形遮蔽：在已拉取的剖面上按该窗口的太阳方位插值（无额外请求）
+        terrain_deg = None
+        if horizon_profile is not None and az_val is not None:
+            try:
+                terrain_deg = horizon.interpolate(horizon_profile, az_val)
+            except Exception:
+                terrain_deg = None
+
         out[(date, window)] = {
             "azimuth": round(pos.get("azimuth", 0.0), 1),
             "sun_elev": round(pos.get("elevation", 0.0), 2),
@@ -244,6 +274,9 @@ def compute_transect(cfg, data, days=None):
             "boundary_score": boundary_score,
             "near_low_cloud": None if near_low is None else round(near_low, 1),
             "block_score": block_score,
+            # 地形遮蔽（PVGIS 90m DEM）
+            "terrain_deg": None if terrain_deg is None else round(float(terrain_deg), 2),
+            "terrain_score": glow_rules.terrain_score(terrain_deg),
             # 保留剖面原始数据，供报告可视化与后续调参
             "ray_canopy": None if canopy is None else [round(v, 1) for v in canopy],
             "ray_hcc": None if hcc is None else [round(v, 1) for v in hcc],
@@ -252,6 +285,15 @@ def compute_transect(cfg, data, days=None):
             "distances_km": list(TRANSECT_DISTANCES_KM),
             # 该高度云层还能接光所允许的最大太阳下沉角（说明用）
             "shadow_deg": round(solar.shadow_height_deg(_REPORT_LAYER_KM, lat), 2),
+            # ---- 光照几何 ----
+            # 阳光与地面相切的距离：比它更近处光线仍在地面之下，云照不到光。
+            # 日落瞬间约 185km —— 这就是"近场低云遮挡"取 0~150km 的几何依据。
+            "light_horizon_km": round(solar.light_horizon_km(elev_val, lat), 1),
+            # 剖面各距离处阳光离地的高度（负值 = 仍在地面之下）
+            "light_path_km": [
+                round(solar.light_path_height_km(d, elev_val, lat), 2)
+                for d in TRANSECT_DISTANCES_KM
+            ],
         }
     return out
 
@@ -275,4 +317,7 @@ def describe(factors):
     near = factors.get("near_low_cloud")
     if near is not None:
         parts.append(f"近场低云 {near:.0f}%")
+    terr = factors.get("terrain_deg")
+    if terr is not None and terr > 0.05:
+        parts.append(f"地形仰角 {terr:.1f}°")
     return "，".join(parts)

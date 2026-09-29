@@ -10,6 +10,7 @@ import datetime as dt
 
 import requests
 
+from . import logger as log_mod
 from . import weather
 from .features import extract_day_features
 from .glow_rules import grade_of, rule_score, vividness_of
@@ -36,9 +37,19 @@ def _model_hourly(multi_data, model):
 
 
 def _valid_hourly(hourly):
-    """判断该模型是否真有云量数据（部分模型可能返回全空）。"""
-    cc = hourly.get("cloud_cover")
-    return bool(cc) and any(v is not None for v in cc)
+    """判断该模型是否真有可用的**分层**云量数据。
+
+    只校验总云量是不够的：缺分层云量时，`features._mean` 会静默返回 0，
+    于是「低云遮挡」因子拿到满分（100 - 0×0.55），把该模式的分系统性抬高，
+    进而污染多源集成的均值（占最终分 30%）和分差（决定置信度）。
+    宁可该模式不参与，也不要一个口径不可比的乐观分。
+    """
+    for var in ("cloud_cover", "cloud_cover_low",
+                "cloud_cover_mid", "cloud_cover_high"):
+        vals = hourly.get(var)
+        if not vals or not any(v is not None for v in vals):
+            return False
+    return True
 
 
 def confidence_of(spread):
@@ -95,10 +106,13 @@ def run_geovisearth_crosscheck(cfg, days=None):
         resp = requests.get(base_url, params=params, timeout=30)
         resp.raise_for_status()
         payload = resp.json()
-    except Exception:
+    except Exception as exc:
+        log_mod.get_logger().warning("星图云第三方对比获取失败：%s", exc)
         return {}
 
     if payload.get("status") != 0:
+        log_mod.get_logger().warning(
+            "星图云返回非 0 状态：%s", str(payload)[:200])
         return {}
 
     result = payload.get("result") or {}
@@ -175,15 +189,18 @@ def run_crosscheck(cfg, days=None):
     """
     try:
         multi = weather.get_multi_model_forecast(cfg, days=days)
-    except Exception:
+    except Exception as exc:
+        log_mod.get_logger().warning("多模型预报获取失败，跳过交叉验证：%s", exc)
         return {}
 
     daily_raw = multi.get("daily", {})
     per_window = {}
+    skipped = []
     for model in CROSSCHECK_MODELS:
         suffix = "_" + model
         hourly = _model_hourly(multi, model)
         if not _valid_hourly(hourly):
+            skipped.append(model)
             continue
         daily = {"time": daily_raw.get("time", [])}
         for key in ("sunrise", "sunset"):
@@ -194,6 +211,12 @@ def run_crosscheck(cfg, days=None):
         for key, f in feats.items():
             score, _ = rule_score(f)
             per_window.setdefault(key, {})[model] = round(score, 1)
+
+    if skipped:
+        log_mod.get_logger().warning(
+            "多模型交叉验证：%s 缺分层云量数据，已跳过（避免乐观偏差）",
+            "、".join(MODEL_LABEL.get(m, m) for m in skipped),
+        )
 
     result = {}
     for key, scores in per_window.items():

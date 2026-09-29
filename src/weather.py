@@ -1,13 +1,24 @@
 """天气数据获取模块。
 
 使用 Open-Meteo 免费接口（无需 API Key）：
-- 预报接口: api.open-meteo.com/v1/forecast
-- 历史接口: archive-api.open-meteo.com/v1/archive
+- 预报接口:   api.open-meteo.com/v1/forecast
+- 历史接口:   historical-forecast-api.open-meteo.com/v1/forecast
+
+**历史接口为什么不用 archive-api（ERA5）？**
+ERA5 是"事后再分析"，比预报平滑得多；更致命的是它的字段集与预报不同 ——
+实测 archive-api 对 `visibility`、`precipitation_probability` 返回全 null，
+而这两个变量在预报侧是有值的。若训练用 archive、推理用 forecast，
+模型在「能见度」这一维上训练时恒为中性值、推理时却是真实方差，
+属于典型的 train-serve skew（且回测指标会因再分析过于平滑而系统性乐观）。
+
+因此训练/回测统一改用 Open-Meteo 的 **Historical Forecast API**
+（2021 年起的历史预报归档，字段与 forecast 完全一致），
+从根上消除口径差。详见 README「数据口径」。
 
 返回的逐小时变量：
 cloud_cover / cloud_cover_low / cloud_cover_mid / cloud_cover_high
 relative_humidity_2m / wind_speed_10m / precipitation / temperature_2m / weather_code
-（预报额外包含 precipitation_probability）
+（预报与历史预报均额外包含 precipitation_probability；visibility 两侧均有）
 以及每日 sunrise / sunset。
 """
 import threading
@@ -16,7 +27,8 @@ import time
 import requests
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+# 历史预报归档（2021 年起）。字段与 FORECAST_URL 完全一致，替代 ERA5 archive-api。
+HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 # ---- 全局限流 -------------------------------------------------------------
 # Open-Meteo 免费额度按"每分钟调用数"限流，超限直接返回 429。启用太阳方位剖面
@@ -141,18 +153,23 @@ def get_forecast(cfg, days=None):
 
 
 def get_historical(cfg, start_date, end_date):
-    """获取历史数据（用于训练）。start_date/end_date 为 'YYYY-MM-DD' 字符串。"""
+    """获取历史**预报归档**数据（用于训练/回测）。
+
+    start_date/end_date 为 'YYYY-MM-DD' 字符串。
+    请求变量与 get_forecast 逐字段对齐（含 precipitation_probability 与 daily 概览），
+    这是消除 train-serve skew 的关键：训练与推理吃同一套列。
+    """
     city = cfg["city"]
     params = {
         "latitude": city["latitude"],
         "longitude": city["longitude"],
         "start_date": start_date,
         "end_date": end_date,
-        "hourly": ",".join(HOURLY_VARS),
-        "daily": "sunrise,sunset",
+        "hourly": ",".join(HOURLY_VARS + ["precipitation_probability"]),
+        "daily": ",".join(DAILY_WEATHER_VARS),
         "timezone": city["timezone"],
     }
-    return _request(ARCHIVE_URL, params)
+    return _request(HISTORICAL_FORECAST_URL, params)
 
 
 # 太阳方位剖面用到的变量（只需要分层云量，响应体小、速度快）
@@ -211,9 +228,11 @@ def get_multi_model_forecast(cfg, days=None, models=None):
     return _request(FORECAST_URL, params, timeout=60)
 
 
-# 空气质量接口（气溶胶光学厚度 AOD / PM2.5）
+# 空气质量接口（气溶胶光学厚度 AOD / PM2.5 / 沙尘与粗颗粒）
+# dust 与 pm10 用于「AOD 分型」：沙尘主导时 AOD 与出霞的关系是非单调的
+# （沙尘散射会助燃），与清洁气溶胶的单调递减不同，必须分型处理。
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
-AIR_QUALITY_VARS = ["aerosol_optical_depth", "pm2_5"]
+AIR_QUALITY_VARS = ["aerosol_optical_depth", "pm2_5", "dust", "pm10"]
 
 
 def get_air_quality(cfg, days=None):

@@ -21,12 +21,16 @@ def _print_summary(results, meta, train_result):
         if train_result.get("trained"):
             m = train_result["metrics"]
             real = s.get("posts", 0)
-            if real == 0:
-                print(f"[训练] 弱监督预训练 · 样本 {s['total']} (正 {s['positive']}/负 {s['negative']})"
-                      f" · 暂无真实观测标注")
-            else:
-                print(f"[训练] 完成 · 样本 {s['total']} (真实观测 {real}/弱监督 {s['total'] - real})"
-                      f" · 准确率 {m.get('accuracy', '—')}")
+            bits = [f"样本 {s['total']}",
+                    f"真实观测 {real}/弱监督 {s['total'] - real}"]
+            # 只报留出集指标 —— 训练集指标衡量的是"能否复刻规则"，不具预测意义
+            if "holdout_accuracy" in m:
+                bits.append(f"留出集准确率 {m['holdout_accuracy']}")
+            if "holdout_auc" in m:
+                bits.append(f"留出集 AUC {m['holdout_auc']}")
+            elif m.get("holdout_note"):
+                bits.append(m["holdout_note"])
+            print("[训练] 完成 · " + " · ".join(str(b) for b in bits))
         else:
             print(f"[训练] 跳过 · {train_result.get('reason', '样本不足')}")
     print("-" * 56)

@@ -21,9 +21,17 @@ import math
 _R_EQ_KM = 6378.1370
 _R_POL_KM = 6356.7523
 
-# 标准日出日落时，太阳中心在地平线下的角度
-# （太阳视半径 0.267° + 地面大气折射约 0.566°）
-SUNRISE_ELEVATION = -0.833
+# 标准日出日落时太阳中心的位置分解：
+# 太阳视半径 0.267° + 地面大气折射约 0.566°（合计 0.833°）
+SOLAR_RADIUS_DEG = 0.267
+ATMOSPHERIC_REFRACTION_DEG = 0.566
+SUNRISE_ELEVATION = -(SOLAR_RADIUS_DEG + ATMOSPHERIC_REFRACTION_DEG)   # -0.833
+
+# 红/蓝光的"等效散射高度"（公里）。用于说明"哪个色光在哪一层还能接光"：
+# 蓝光波长短、被大气散射得更彻底，等效散射层更高，因此昏影时先消失；
+# 红光穿透力强、等效散射层低，是火烧云主色调。
+# 仅作说明与报告展示用途，不参与阴影角计算（阴影角取云的物理高度）。
+EQUIV_SCATTER_KM = {"red": 3.0, "blue": 11.0}
 
 
 def earth_radius_km(latitude):
@@ -199,6 +207,42 @@ def shadow_height_deg(height_km, latitude):
     if ratio >= 1.0:
         return 0.0
     return math.degrees(math.acos(ratio))
+
+
+def light_horizon_km(sun_elev_deg, latitude):
+    """太阳高度角为 sun_elev_deg 时，阳光与地面**相切**的距离（公里）。
+
+    这是方向性剖面的一个关键几何量：比这个距离更近的地方，光线还在地面
+    之下（被地球本身挡住），那里的云无论多低都照不到光。
+
+    推导：光线在距离 L 处相对地面的高度 = L²/(2R) − L·tan|e|（e 为太阳高度角，
+    在地平线下时取负值）。令其为 0 得 L = 2R·tan|e|。
+
+    以日落瞬间（e = −0.833°、R≈6371km）为例：L ≈ **185km** ——
+    也就是说日落那一刻，185km 以内的云底全部已进入地球阴影。
+    这为「近场低云遮挡」因子取 0~150km 提供了直接依据。
+
+    sun_elev_deg >= 0（太阳在地平线上）时返回 0.0。
+    """
+    if sun_elev_deg is None or sun_elev_deg >= 0:
+        return 0.0
+    r = earth_radius_km(latitude)
+    return 2.0 * r * math.tan(math.radians(-float(sun_elev_deg)))
+
+
+def light_path_height_km(distance_km, sun_elev_deg, latitude):
+    """太阳高度角为 sun_elev_deg 时，阳光在 distance_km 处离地的高度（公里）。
+
+    负值表示此处光线仍在地面之下（该处的云照不到光）；
+    正值表示此处只有高于该高度的云才能被这束光照亮。
+
+    与 `light_horizon_km` 同源：
+        高度 = L²/(2R) − L·tan|e|
+    """
+    r = earth_radius_km(latitude)
+    drop = float(distance_km) ** 2 / (2.0 * r)
+    tangent = float(distance_km) * math.tan(math.radians(float(sun_elev_deg)))
+    return drop + tangent
 
 
 def elevation_at_utc_offset(local_iso, utc_offset_seconds):

@@ -1,13 +1,17 @@
 """每日训练模块。
 
 流程：
-1. 拉取历史逐小时气象数据（默认 120 天）；
+1. 拉取历史逐小时气象数据（默认 120 天，走 Historical Forecast API，
+   字段与推理侧的预报逐字段一致，避免 train-serve skew）；
 2. 在每个日出/日落窗口抽取特征 + 规则评分；
 3. 组装训练标签：
    a. 帖子观测标注（posts.csv，正负例，最可靠）
    b. 坏天气自动负样本（明显雨/阴 → 0）
    c. 弱监督 bootstrap（规则分高 → 1，低 → 0，中段丢弃）
-4. 样本足够则训练模型并保存；否则退回纯规则模式。
+4. **真实标签闸门**：真实观测标注不足 `model.min_real_labels`（默认 30）时，
+   一律不训练不保存，直接退回纯规则模式 —— 因为 (c) 类标签由规则分生成，
+   用它训练出的指标衡量的是"能否复刻规则引擎"，没有预测意义；
+5. 真实标注充足时训练并保存模型，评估采用**时序留出且留出集只含真实观测**。
 """
 import datetime as dt
 
@@ -105,6 +109,8 @@ def build_training_rows(cfg):
     stats = {
         "total": len(rows),
         "posts": len(posts),
+        # 能匹配到特征、真正进入训练集的真实观测行数（留出集也是从这些里取）
+        "post_rows": sum(1 for r in rows if r.get("source") == "post"),
         "auto_negative": n_auto_neg,
         "weak_positive": n_weak_pos,
         "weak_negative": n_weak_neg,
@@ -115,17 +121,44 @@ def build_training_rows(cfg):
 
 
 def run_training(cfg):
-    """执行训练，返回结果字典。"""
+    """执行训练，返回结果字典。
+
+    **真实标签闸门**：真实观测标注少于 `model.min_real_labels` 时一律不训练、
+    不保存模型。原因是弱监督标签由 `rule_score` 生成，而 `rule_score` 又是
+    （或曾是与）模型输入的确定性函数，用它训练出的模型指标衡量的是
+    "能否复刻规则引擎"，不能用来宣称预测能力。宁可退回纯规则评分，
+    也不给出一个统计上站不住的"模型置信度"。
+    """
     rows, stats = build_training_rows(cfg)
 
     n_pos = stats["positive"]
     n_neg = stats["negative"]
+    n_real = stats["post_rows"]
     min_samples = cfg["model"]["min_samples"]
+    min_real = int(cfg["model"].get("min_real_labels", 30))
+    holdout_ratio = float(cfg["model"].get("holdout_ratio", 0.3))
 
-    if len(rows) >= min_samples and n_pos >= 5 and n_neg >= 5:
-        model = GlowModel(cfg["model"]["type"])
-        metrics = model.train(rows)
-        model.save(cfg["model"]["model_path"])
-        return {"trained": True, "stats": stats, "metrics": metrics}
-    return {"trained": False, "stats": stats,
-            "metrics": {}, "reason": "训练样本不足，暂用纯规则评分"}
+    if n_real < min_real:
+        return {
+            "trained": False,
+            "stats": stats,
+            "metrics": {},
+            "reason": (
+                f"真实观测标注 {n_real} 条 < 门槛 {min_real} 条，暂用纯规则评分"
+                f"（弱监督标签由规则分生成，不足以支撑模型评估，"
+                f"请补充 data/raw/posts.csv 的真实观测）"
+            ),
+        }
+
+    if len(rows) < min_samples or n_pos < 5 or n_neg < 5:
+        return {"trained": False, "stats": stats, "metrics": {},
+                "reason": "训练样本不足，暂用纯规则评分"}
+
+    model = GlowModel(cfg["model"]["type"])
+    metrics = model.train(rows, holdout_ratio=holdout_ratio, real_labels=stats["posts"])
+    if not metrics.get("ok"):
+        return {"trained": False, "stats": stats, "metrics": {},
+                "reason": metrics.get("reason", "训练未成功")}
+
+    model.save(cfg["model"]["model_path"])
+    return {"trained": True, "stats": stats, "metrics": metrics}

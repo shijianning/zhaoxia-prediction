@@ -137,6 +137,8 @@ def _transect_panel(tr):
     elev = tr.get("sun_elev")
     shadow = tr.get("shadow_deg")
     near = tr.get("near_low_cloud")
+    terrain = tr.get("terrain_deg")
+    light_h = tr.get("light_horizon_km")
 
     facts = []
     if az is not None:
@@ -149,8 +151,19 @@ def _transect_panel(tr):
         facts.append("太阳方向无中高云幕")
     if near is not None:
         facts.append(f"近场低云 {near:.0f}%")
+    if terrain is not None and terrain > 0.05:
+        facts.append(f"地形仰角 {terrain:.1f}°")
     if shadow is not None:
         facts.append(f"3km 层阴影角 {shadow:.2f}°")
+
+    # 光照几何提示：阳光与地面相切的距离 —— 比这更近的地方光线仍在地面之下
+    light_note = ""
+    if light_h is not None and light_h > 0:
+        light_note = (
+            f'<div style="font-size:10px;color:#94a3b8;line-height:1.5;margin-top:2px;">'
+            f'💡 此刻阳光与地面相切于 <strong>{light_h:.0f}km</strong> —— '
+            f'比这更近处光线仍在地面之下，那里的云底照不到光</div>'
+        )
 
     svg = (
         f'<svg viewBox="0 0 320 64" width="100%" height="72" '
@@ -172,6 +185,7 @@ def _transect_panel(tr):
         f'{svg}'
         f'<div style="font-size:10px;color:#64748b;line-height:1.6;">'
         f'{html.escape(" · ".join(facts))}</div>'
+        f'{light_note}'
         f'</div>'
     )
 
@@ -547,23 +561,34 @@ def render_report(cfg, results, meta, train_result=None):
         s = train_result["stats"]
         m = train_result["metrics"]
         real = s.get("posts", 0)
-        if real == 0:
-            model_note = (
-                f'模型为弱监督预训练版（样本 {s["total"]}，尚无真实观测标注）。'
-                f'当前评分主要来自气象规则；补充 posts.csv 真实观测后，'
-                f'模型会逐步学习校准、趋于真实'
-            )
-        else:
-            model_note = (
-                f'模型已训练 · 样本 {s["total"]}（真实观测 {real} 条'
-                f' + 弱监督 {s["total"] - real} 条）'
-                f' · 训练集准确率 {m.get("accuracy", "—")}'
-                + (f' · AUC {m.get("auc", "—")}' if "auc" in m else "")
-            )
+        model_note = (f'模型已训练 · 样本 {s["total"]}（真实观测 {real} 条'
+                      f' + 弱监督 {s["total"] - real} 条）')
+        # 只展示留出集指标 —— 训练集指标是"能否复刻规则"，不具预测意义
+        if "holdout_auc" in m or "holdout_accuracy" in m:
+            bits = []
+            if "holdout_accuracy" in m:
+                bits.append(f'留出集准确率 {m["holdout_accuracy"]}')
+            if "holdout_auc" in m:
+                bits.append(f'留出集 AUC {m["holdout_auc"]}')
+            model_note += (" · " + " · ".join(bits)
+                           + f'（时序留出 {m.get("n_test", 0)} 条真实观测）')
+        elif m.get("holdout_note"):
+            model_note += f' · {m["holdout_note"]}'
+    elif meta.get("model_gated"):
+        model_note = (
+            f'真实观测标注 {meta.get("model_real_labels", 0)} 条'
+            f' < 门槛 {meta.get("min_real_labels", 30)} 条，已按设计退回纯规则评分 '
+            f'—— 弱监督标签由规则分本身生成，用它算出的指标只能说明'
+            f'"能否复刻规则引擎"，不能说明真实预测能力'
+        )
     elif meta.get("has_model"):
         model_note = "使用已保存模型预测"
     else:
-        model_note = "样本不足，当前为纯规则评分模式（补充帖子标注后自动启用 ML）"
+        model_note = (
+            "当前为纯规则评分模式。模型启用的条件是真实观测标注达到门槛"
+            "（config.yaml 的 model.min_real_labels，默认 30 条）；"
+            "在 data/raw/posts.csv 补充真实观测后会自动启用"
+        )
 
     best_line = ""
     if best:
@@ -606,10 +631,13 @@ def render_report(cfg, results, meta, train_result=None):
       <div><strong style="color:#334155;">说明</strong></div>
       <div>· 评分 0-100，≥75 优秀、60-75 良好、45-60 一般、&lt;45 平淡。</div>
       <div>· 鲜艳度分级（对齐 SunsetBot）：微烧/小烧/中烧/大烧/优质大烧/世纪大烧；🔥 为 0-10 鲜艳度指数（对齐 chromasky）。</div>
-      <div>· 评分由 9 因子加权：云结构/低云遮挡/湿度/降水/风速/气溶胶AOD/能见度（合计 84%），加上方向性的「剖面云边界」与「太阳方位遮挡」（合计 16%）。其中 AOD 与能见度共同衡量大气通透度。</div>
-      <div>· 气溶胶光学厚度(AOD)越低、能见度越高，天空越通透、火烧云越鲜艳。</div>
+      <div>· 评分由 10 因子加权：云结构/低云遮挡/湿度/降水/风速/气溶胶AOD/能见度（基础因子合计 84%），加上方向性的「剖面云边界」「太阳方位遮挡」「地形遮蔽」（合计 16%）。</div>
+      <div>· <strong style="color:#334155;">缺数据 = 不表态</strong>：任何一个因子取不到数（AOD 接口失败、模式缺分层云量等），该因子会被<strong>整体移出加权</strong>，其余因子按比例重新归一化 —— 而不是给一个"中间分"，因为带权重的中间分依然会牵动总分。</div>
+      <div>· 气溶胶(AOD)：清洁天气下 AOD 越低、能见度越高，天空越通透、火烧云越鲜艳；但若<strong>沙尘主导</strong>（dust/PM10 高），AOD 与出霞的关系转为非单调 —— 约 0.25 附近反而最出彩，因为沙尘的前向散射像一层暖色滤镜。</div>
+      <div>· <strong style="color:#334155;">雨洗效应</strong>：窗口前 24h 若有大雨（≥10mm），气溶胶被湿沉降冲刷约 50%，通透度实际优于预报值；若是微量降水，反而因颗粒吸湿增长使通透度略降。</div>
+      <div>· <strong style="color:#334155;">地形遮蔽</strong>：太阳方位上的地平线仰角（PVGIS 90m 数字高程）。西边有山时可见的低空天空被切掉一块，而那些天空正是低角度火烧云所在。</div>
       <div>· <strong style="color:#334155;">方向性</strong>：朝霞晚霞的光来自太阳所在方位，因此程序会沿日出/日落方位角拉一条 0~500km 剖面。「剖面云边界」衡量云层边缘的位置 —— 云幕在约 400km 处到达边缘时，边缘以外的晴空让低角度阳光从云层下方斜射进来，把近处云底整体点亮，这是最壮观火烧云的成因；「太阳方位遮挡」则看太阳方向近场(0~150km)的低云会不会把整条光路切断。</div>
-      <div>· 日落瞬间太阳在地平线下约 0.83°，受地球曲率阴影限制，1km 的低云此时已变暗（阴影角约 1.02°），而 5km 以上的中高云仍在接光（约 2.27°）—— 这是"火烧云多是中高云"的几何原因。</div>
+      <div>· 日落瞬间太阳在地平线下约 0.83°，受地球曲率阴影限制，1km 的低云此时已变暗（阴影角约 1.02°），而 5km 以上的中高云仍在接光（约 2.27°）—— 这是"火烧云多是中高云"的几何原因。同一几何还给出：此刻阳光与地面相切于约 <strong>185km</strong>，比这更近处的云底完全照不到光。</div>
       <div>· {html.escape(model_note)}。</div>
       <div>· 交叉验证：用 GFS(美)/ICON(德)/GEM(加) 三个独立气象模式互相印证，并按其均值做多源集成打分（占 30% 权重）；分差越小、置信度越高，分差大说明该时段云况不稳定。</div>
       <div>· 朝霞/晚霞受局地云况影响大，预报仅供参考，出门前请结合实际天空状况判断。</div>

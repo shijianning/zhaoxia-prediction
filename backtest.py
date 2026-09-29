@@ -4,6 +4,14 @@
 「规则分 + 模型概率」的预测准确率，并对推送阈值做扫描校准，形成
 「预测 -> 观测 -> 回测 -> 再校准」闭环。
 
+**数据口径**：历史气象走 Open-Meteo 的 Historical Forecast API（历史预报归档），
+与推理侧使用的 forecast 逐字段一致 —— 因此这里的准确率与上线表现可比。
+（早期版本用 ERA5 再分析，那是"事后最优估计"，指标天然乐观，不能代表真实表现。）
+
+**不含方向性因子**：历史剖面的取数成本过高（每天两条射线 × 上百天），
+本回测只复现 7 个基础因子。因而已配置 `transect` 时，回测分与实际推理分
+存在口径差（实际分含 3 个方向性因子）。校准推送阈值时请知悉这一点。
+
 用法：
     python backtest.py                 # 用默认阈值扫描
     python backtest.py --thresholds 60,65,70,75,80
@@ -13,6 +21,7 @@ import datetime as dt
 import sys
 
 from src import features as feat_mod
+from src import logger as log_mod
 from src import posts as posts_mod
 from src import train
 from src import weather
@@ -34,8 +43,8 @@ def _load_features(cfg, dates):
     try:
         aq = weather.get_historical_air_quality(cfg, start, end)
         feat_mod.add_air_quality(day_feats, aq)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_mod.get_logger().warning("历史空气质量获取失败，通透度因子移出加权：%s", exc)
     for key, f in day_feats.items():
         f["rule_score"], f["breakdown"] = rule_score(f)
         f["date"], f["window"] = key
@@ -43,7 +52,7 @@ def _load_features(cfg, dates):
 
 
 def _final_score(f, model):
-    """复现 predict.py 的最终分（回测不含多模型交叉验证）。"""
+    """复现 predict.py 的最终分（回测不含多模型交叉验证与方向性因子）。"""
     if model is not None:
         prob = model.predict_proba(f)
         return round(0.5 * f["rule_score"] + 0.5 * prob * 100, 1)
@@ -75,6 +84,12 @@ def main():
     day_feats = _load_features(cfg, dates)
 
     model = GlowModel.load(cfg["model"]["model_path"])
+    # 与 predict.py 相同的真实标签闸门：模型不够格时按纯规则分回测
+    min_real = int(cfg["model"].get("min_real_labels", 30))
+    if model is not None and getattr(model, "real_labels", 0) < min_real:
+        print(f"提示：已保存模型（真实观测 {getattr(model, 'real_labels', 0)} 条）"
+              f"未达门槛 {min_real} 条，本次回测按纯规则分计算。")
+        model = None
 
     # 3) 逐标签计算最终分
     print("=" * 64)

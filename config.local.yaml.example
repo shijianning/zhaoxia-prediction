@@ -8,6 +8,12 @@ notify:
   sckey: "SCT你的SendKey"   # Server酱 SendKey，https://sct.ftqq.com 微信扫码登录后获取
   threshold: 70              # 预测分达到该值（对应"大烧"）才推送
 
+# 腾讯地图 key（全国地图用）—— **务必写在这里，不要写进 config.yaml**
+# config.yaml 会随公开仓库一起提交，把 key 写在那里等于把 key 公开。
+# 留空（或删掉本段）= 走本地代理模式，前端不携带 key。
+map:
+  tmap_key: "你的腾讯地图key"
+
 # 如需给本地 MySQL 设置密码，也写在这里（覆盖 config.yaml）：
 # database:
 #   password: "你的数据库密码"
