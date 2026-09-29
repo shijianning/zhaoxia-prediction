@@ -13,12 +13,57 @@
 （云型/能见度/湿度/降水/总云量）；第 6/7 点吸收 chromasky 的 AOD 思想与
 能见度因子，二者共同构成"通透类"打分，合计权重约 28%。
 
+**第 8/9 点补充"方向性"**（见 transect.py）：上面 1~7 点用的都是"观测点头顶
+的平均云量"，等于假设天空各方向均匀。但朝霞晚霞是有方向性的光学现象——
+8. 剖面云边界 —— 沿太阳方位找云层边缘的位置。云层在约 400km 处到达边缘时，
+   边缘外的晴空让低角度阳光从云层下方斜射进来，把近处云幕的下表面整体点亮，
+   这是最壮观火烧云的成因（chromasky 权重最高的因子）；
+9. 太阳方位遮挡 —— 太阳方向近场(0~150km)的低云量。这一段的低云会直接把
+   低角度光路切断，比全天空平均低云更能反映真实遮挡。
+
+权重设计：原有 7 因子权重整体缩放到 0.84，8/9 两点合计 0.16。
+`rule_score` 会**动态归一化**——当剖面数据不可用（网络失败或未启用）时，
+权重自动回落到原有 7 因子，结果与未启用剖面时逐位一致，保证优雅降级。
+
 输出 0-100 分，以及各因素拆解，用于报告展示与 ML 弱监督标签。
 """
 
 
 def _clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
+
+
+# ---- 权重表 ---------------------------------------------------------------
+# 原 7 因子（合计 1.00），来自各开源项目的经验标定
+_BASE_WEIGHTS = {
+    "云结构": 0.30,
+    "低云遮挡": 0.12,
+    "湿度": 0.12,
+    "降水": 0.10,
+    "风速": 0.08,
+    "通透度": 0.15,
+    "能见度": 0.13,
+}
+
+# 剖面因子权重（合计 0.16）。原有 7 因子同时乘以 (1 - 0.16) 保持总和为 1。
+_TRANSECT_WEIGHTS = {
+    "剖面云边界": 0.09,
+    "太阳方位遮挡": 0.07,
+}
+
+_PROFILE_DECAY = 1.0 - sum(_TRANSECT_WEIGHTS.values())   # 0.84
+
+# 云层边缘效应的两个关键距离（公里）：
+# 400km 处存在边缘最优（低角度阳光从边缘下方照亮近处云底），
+# 超过 500km 视为"云幕铺满全程、没有边缘"。
+OPTIMAL_BOUNDARY_KM = 400.0
+MAX_BOUNDARY_KM = 500.0
+# 云量低于该值即视为云层边缘 / 晴空
+CLOUD_EDGE_THRESHOLD = 10.0
+
+# 太阳方位近场低云的扣分斜率。近场低云直接切断光路，
+# 比全天空平均低云（斜率 0.55）更决定性，故取更陡的 0.9。
+AZIMUTH_BLOCK_SLOPE = 0.9
 
 
 def transparency_score(aod):
@@ -65,10 +110,75 @@ def visibility_score(vis):
     return 18.0
 
 
+def boundary_distance_score(profile, distances):
+    """剖面云边界因子：沿太阳方位找到云层边缘的位置，按经验曲线打分。
+
+    profile:   沿太阳方位的中高云量序列（%），对应 distances 上的采样点。
+    distances: 各采样点到观测点的距离（公里）。
+
+    物理依据是"云层边缘效应"：云层在约 400km 处到达边缘时，边缘以外的晴空
+    让低角度阳光从云层下方斜射进来，把近处云幕的下表面整体点亮；云幕一直铺到
+    天边（不见边缘）或近处就没云（无幕布承接），都烧不起来。
+
+    曲线（沿用 chromasky 的经验标定）：
+        0km → 0 分；400km → 满分 100；400~500km 线性衰减到 0；≥500km → 0 分。
+
+    与"云结构"的分工：本因子只回答"边缘在哪"，不回答"有没有云"。
+    因此当射线起点（头顶）就没有中高云、无从谈边缘时，返回 (None, None)，
+    由调用方把这一项**整体移出加权**——注意不是给个中间分，因为带权重的
+    中间分依然会牵动总分，那不叫"不表态"。这样"没云 = 烧不起来"的判断
+    完全交给"云结构"因子（它看的是全天空总云量），避免同一件事被扣两次分。
+
+    返回 (boundary_km, score)；不适用时返回 (None, None)。
+    """
+    if not profile:
+        return None, None
+
+    # 头顶没有承光的云幕 → 本因子无从判断，整体移出加权
+    if profile[0] < CLOUD_EDGE_THRESHOLD:
+        return None, None
+
+    edge_km = None
+    for dist, value in zip(distances, profile):
+        if dist <= 0:
+            continue
+        if value < CLOUD_EDGE_THRESHOLD:
+            edge_km = float(dist)
+            break
+
+    if edge_km is None:
+        # 全程都有云 —— 没有边缘，缺少"从下方打光"的通道
+        return MAX_BOUNDARY_KM, 0.0
+
+    if edge_km <= OPTIMAL_BOUNDARY_KM:
+        # 边缘越近，近处可供承接阳光的云幕越少
+        score = edge_km / OPTIMAL_BOUNDARY_KM * 100.0
+    else:
+        score = (1.0 - (edge_km - OPTIMAL_BOUNDARY_KM)
+                 / (MAX_BOUNDARY_KM - OPTIMAL_BOUNDARY_KM)) * 100.0
+    return edge_km, round(_clamp(score), 1)
+
+
+def azimuth_block_score(near_low_cloud):
+    """太阳方位遮挡因子：太阳方向近场低云量越低越好。
+
+    near_low_cloud: 0~150km 范围内的低云量均值（%）。无数据时返回 None，
+    由调用方把这一项整体移出加权（而不是给中间分）。
+
+    日出/日落时阳光几乎水平地射来，近场这段的低云会把整条光路切断，
+    因此它比"全天空平均低云"更能反映真实遮挡，扣分也更陡。
+    """
+    if near_low_cloud is None:
+        return None
+    return round(_clamp(100.0 - float(near_low_cloud) * AZIMUTH_BLOCK_SLOPE), 1)
+
+
 def rule_score(f):
     """计算规则评分。
 
-    f: 特征字典（见 features.py）。
+    f: 特征字典（见 features.py）。若含 "transect"（见 transect.py），
+       则额外计入剖面云边界与太阳方位遮挡两个方向性因子。
+
     返回 (score_0_100, breakdown_dict)。
     """
     high = f.get("cloud_high", 0.0)
@@ -128,15 +238,24 @@ def rule_score(f):
     vis_score = visibility_score(vis)
     breakdown["能见度"] = round(vis_score, 1)
 
-    score = (
-        0.30 * cloud_score
-        + 0.12 * low_view
-        + 0.12 * hum_score
-        + 0.10 * rain_score
-        + 0.08 * wind_score
-        + 0.15 * trans_score
-        + 0.13 * vis_score
-    )
+    # 8/9) 方向性因子（需 transect.py 的剖面数据）
+    # 权重动态归一化：剖面数据缺失时自动回落到原有 7 因子，
+    # 使"未启用/取数失败"的结果与升级前逐位一致。
+    weights = dict(_BASE_WEIGHTS)
+    transect_info = f.get("transect") or {}
+    boundary = transect_info.get("boundary_score")
+    block = transect_info.get("block_score")
+    if boundary is not None or block is not None:
+        weights = {k: v * _PROFILE_DECAY for k, v in weights.items()}
+        if boundary is not None:
+            breakdown["剖面云边界"] = round(float(boundary), 1)
+            weights["剖面云边界"] = _TRANSECT_WEIGHTS["剖面云边界"]
+        if block is not None:
+            breakdown["太阳方位遮挡"] = round(float(block), 1)
+            weights["太阳方位遮挡"] = _TRANSECT_WEIGHTS["太阳方位遮挡"]
+
+    total_weight = sum(weights.values())
+    score = sum(weights[k] * breakdown[k] for k in weights) / total_weight
     breakdown["综合"] = round(_clamp(score), 1)
     return breakdown["综合"], breakdown
 
@@ -189,6 +308,8 @@ def factor_note(breakdown):
         "风速": "风速不理想",
         "通透度": "大气浑浊（气溶胶偏高），颜色易发灰",
         "能见度": "低空能见度不足（有霾/雾），红橙光衰减明显",
+        "剖面云边界": "太阳方向没有理想的云层边缘，光难以从云底下方打进来",
+        "太阳方位遮挡": "太阳方向近处低云偏多，会挡住低角度阳光",
     }
     if worst_val >= 80:
         return "各因素配合良好，具备出霞条件"

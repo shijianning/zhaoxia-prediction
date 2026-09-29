@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 data/model/
+data/model_backup_*/
 output/
 *.joblib
 .DS_Store

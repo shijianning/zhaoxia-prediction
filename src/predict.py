@@ -4,6 +4,7 @@
 """
 from . import crosscheck
 from . import features as feat_mod
+from . import transect
 from . import weather
 from .glow_rules import chroma_index, grade_of, rule_score
 from .model import GlowModel
@@ -34,7 +35,20 @@ def run_prediction(cfg):
     # 第 4 方第三方对比：星图云官方火烧云预报（未配置 token 时为空，不参与）
     gvcheck = crosscheck.run_geovisearth_crosscheck(cfg)
 
+    # 太阳方位剖面：沿日出/日落方位拉 0~500km 剖面，补上"方向性"评分。
+    # 单次多坐标请求，失败即返回 {}，评分自动回落到原有 7 因子。
+    tr_check = {}
+    if transect.enabled(cfg, "single"):
+        try:
+            tr_check = transect.compute_transect(cfg, data)
+        except Exception:
+            tr_check = {}
+
     for key, f in day_feats.items():
+        tr = tr_check.get(key)
+        if tr:
+            f["transect"] = tr
+
         f["rule_score"], f["breakdown"] = rule_score(f)
         f["date"], f["window"] = key
 

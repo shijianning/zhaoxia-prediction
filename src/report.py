@@ -66,6 +66,116 @@ def _geovisearth_line(gv):
     )
 
 
+def _transect_panel(tr):
+    """太阳方位剖面小图。
+
+    把"从观测点朝太阳方向 0~500km 这条线上有什么云"画出来 —— 这是本项目
+    相对"只看头顶云量"的关键升级：朝霞晚霞的光来自太阳方位，承光的幕布和
+    它的边缘位置都在几十到几百公里之外。
+
+    用纯内联 SVG 绘制（无 JS、无外部请求），柱子越高云量越大：
+    浅蓝 = 高云（承光的幕布），灰色 = 低云（会挡光）。
+    """
+    if not tr:
+        return ""
+    # 幕布用中云+高云（与"剖面云边界"因子口径一致），低云单独画
+    hcc = tr.get("ray_canopy") or tr.get("ray_hcc") or []
+    lcc = tr.get("ray_lcc") or []
+    dists = tr.get("distances_km") or []
+    n = len(hcc) or len(lcc)
+    if n == 0:
+        return ""
+
+    pad_l, pad_r, top, bottom = 26.0, 26.0, 10.0, 52.0
+    plot_w = 320.0 - pad_l - pad_r
+    slot = plot_w / n
+    bar_w = max(2.0, slot - 2.0)
+    span = bottom - top
+
+    def bars(series, color, opacity):
+        if not series:
+            return ""
+        out = []
+        for i, v in enumerate(series):
+            if v is None:
+                continue
+            h = max(0.6, float(v) / 100.0 * span)
+            x = pad_l + i * slot + (slot - bar_w) / 2.0
+            out.append(
+                f'<rect x="{x:.1f}" y="{bottom - h:.1f}" width="{bar_w:.1f}" '
+                f'height="{h:.1f}" fill="{color}" opacity="{opacity}" rx="1"/>'
+            )
+        return "".join(out)
+
+    # 云层边缘标记
+    marker = ""
+    edge_km = tr.get("boundary_km")
+    if edge_km is not None and dists:
+        max_d = max(dists) or 1
+        x = pad_l + min(float(edge_km), max_d) / max_d * plot_w
+        marker = (
+            f'<line x1="{x:.1f}" y1="{top - 3}" x2="{x:.1f}" y2="{bottom}" '
+            f'stroke="#ef4444" stroke-width="1.4" stroke-dasharray="3 2"/>'
+            f'<text x="{x:.1f}" y="{top - 5}" font-size="8" fill="#ef4444" '
+            f'text-anchor="middle">边缘</text>'
+        )
+
+    axis = (
+        f'<line x1="{pad_l}" y1="{bottom}" x2="{pad_l + plot_w}" y2="{bottom}" '
+        f'stroke="#cbd5e1" stroke-width="1"/>'
+        f'<text x="{pad_l}" y="{bottom + 9}" font-size="8" fill="#94a3b8" '
+        f'text-anchor="middle">0</text>'
+        f'<text x="{pad_l + plot_w * 0.4:.0f}" y="{bottom + 9}" font-size="8" '
+        f'fill="#94a3b8" text-anchor="middle">200</text>'
+        f'<text x="{pad_l + plot_w * 0.8:.0f}" y="{bottom + 9}" font-size="8" '
+        f'fill="#94a3b8" text-anchor="middle">400</text>'
+        f'<text x="{pad_l + plot_w:.0f}" y="{bottom + 9}" font-size="8" '
+        f'fill="#94a3b8" text-anchor="middle">500km</text>'
+    )
+
+    az = tr.get("azimuth")
+    elev = tr.get("sun_elev")
+    shadow = tr.get("shadow_deg")
+    near = tr.get("near_low_cloud")
+
+    facts = []
+    if az is not None:
+        facts.append(f"太阳方位 {az:.0f}°")
+    if elev is not None:
+        facts.append(f"高度角 {elev:.2f}°")
+    if edge_km is not None:
+        facts.append(f"云层边缘 {edge_km:.0f}km")
+    else:
+        facts.append("太阳方向无中高云幕")
+    if near is not None:
+        facts.append(f"近场低云 {near:.0f}%")
+    if shadow is not None:
+        facts.append(f"3km 层阴影角 {shadow:.2f}°")
+
+    svg = (
+        f'<svg viewBox="0 0 320 64" width="100%" height="72" '
+        f'style="display:block;overflow:visible;" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'{bars(lcc, "#cbd5e1", 0.9)}'
+        f'{bars(hcc, "#60a5fa", 0.85)}'
+        f'{marker}{axis}</svg>'
+    )
+
+    return (
+        f'<div style="margin-top:10px;padding:10px;background:#f8fafc;'
+        f'border:1px solid #e2e8f0;border-radius:10px;">'
+        f'<div style="font-size:11px;font-weight:700;color:#334155;margin-bottom:4px;">'
+        f'🧭 太阳方位剖面（0→500km，朝日出/日落方向）</div>'
+        f'<div style="font-size:10px;color:#94a3b8;margin-bottom:2px;">'
+        f'<span style="color:#60a5fa;">■</span> 中高云（承接阳光的幕布）&nbsp;'
+        f'<span style="color:#cbd5e1;">■</span> 低云（遮挡低角度光线）</div>'
+        f'{svg}'
+        f'<div style="font-size:10px;color:#64748b;line-height:1.6;">'
+        f'{html.escape(" · ".join(facts))}</div>'
+        f'</div>'
+    )
+
+
 def _window_block(title, emoji, f):
     score = f["final"]
     note = factor_note(f["breakdown"])
@@ -105,6 +215,7 @@ def _window_block(title, emoji, f):
       </div>
       <div style="margin-top:10px;font-size:12px;color:#475569;line-height:1.6;">{html.escape(note)}</div>
       <div style="margin-top:6px;font-size:11px;color:#94a3b8;">{html.escape(factors)}</div>
+      {_transect_panel(f.get("transect"))}
       {_xcheck_line(f.get("xcheck"))}
       {_geovisearth_line(f.get("geovisearth"))}
     </div>'''
@@ -495,8 +606,10 @@ def render_report(cfg, results, meta, train_result=None):
       <div><strong style="color:#334155;">说明</strong></div>
       <div>· 评分 0-100，≥75 优秀、60-75 良好、45-60 一般、&lt;45 平淡。</div>
       <div>· 鲜艳度分级（对齐 SunsetBot）：微烧/小烧/中烧/大烧/优质大烧/世纪大烧；🔥 为 0-10 鲜艳度指数（对齐 chromasky）。</div>
-      <div>· 评分由 7 因子加权：云结构/低云遮挡/湿度/降水/风速/气溶胶AOD/能见度，其中 AOD 与能见度共同衡量大气通透度。</div>
+      <div>· 评分由 9 因子加权：云结构/低云遮挡/湿度/降水/风速/气溶胶AOD/能见度（合计 84%），加上方向性的「剖面云边界」与「太阳方位遮挡」（合计 16%）。其中 AOD 与能见度共同衡量大气通透度。</div>
       <div>· 气溶胶光学厚度(AOD)越低、能见度越高，天空越通透、火烧云越鲜艳。</div>
+      <div>· <strong style="color:#334155;">方向性</strong>：朝霞晚霞的光来自太阳所在方位，因此程序会沿日出/日落方位角拉一条 0~500km 剖面。「剖面云边界」衡量云层边缘的位置 —— 云幕在约 400km 处到达边缘时，边缘以外的晴空让低角度阳光从云层下方斜射进来，把近处云底整体点亮，这是最壮观火烧云的成因；「太阳方位遮挡」则看太阳方向近场(0~150km)的低云会不会把整条光路切断。</div>
+      <div>· 日落瞬间太阳在地平线下约 0.83°，受地球曲率阴影限制，1km 的低云此时已变暗（阴影角约 1.02°），而 5km 以上的中高云仍在接光（约 2.27°）—— 这是"火烧云多是中高云"的几何原因。</div>
       <div>· {html.escape(model_note)}。</div>
       <div>· 交叉验证：用 GFS(美)/ICON(德)/GEM(加) 三个独立气象模式互相印证，并按其均值做多源集成打分（占 30% 权重）；分差越小、置信度越高，分差大说明该时段云况不稳定。</div>
       <div>· 朝霞/晚霞受局地云况影响大，预报仅供参考，出门前请结合实际天空状况判断。</div>

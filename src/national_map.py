@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import features as feat_mod
+from . import transect
 from . import weather
 from .glow_rules import grade_of, rule_score, vividness_of
 
@@ -107,15 +108,40 @@ def predict_city(base_cfg, name, lat, lon, days=2):
     except Exception:
         pass
 
+    # 太阳方位剖面（方向性评分）：每城多一次多坐标请求，失败/关闭时自动降级
+    if transect.enabled(base_cfg, "national"):
+        try:
+            tr_check = transect.compute_transect(cfg, data)
+        except Exception:
+            tr_check = {}
+        for key, f in day_feats.items():
+            tr = tr_check.get(key)
+            if tr:
+                f["transect"] = tr
+
     result = {}
     for key, f in day_feats.items():
         date, window = key
         score, _ = rule_score(f)
-        result.setdefault(date, {})[window] = {
+        info = {
             "score": round(score, 0),
             "vivid": vividness_of(score),
             "grade": grade_of(score),
         }
+        # 方向性剖面摘要，供地图气泡展示（失败/未启用时不带该字段）
+        tr = f.get("transect")
+        if tr:
+            bits = []
+            az = tr.get("azimuth")
+            if az is not None:
+                bits.append(f"太阳方位 {az:.0f}°")
+            km = tr.get("boundary_km")
+            bits.append(f"云幕边缘 {km:.0f}km" if km is not None else "太阳向无高云")
+            near = tr.get("near_low_cloud")
+            if near is not None:
+                bits.append(f"近场低云 {near:.0f}%")
+            info["dir"] = " · ".join(bits)
+        result.setdefault(date, {})[window] = info
     # 每日天气概览（日出日落/温度/降雨），供地图气泡展示
     for date, wx in daily_wx.items():
         result.setdefault(date, {})["daily"] = wx
@@ -136,6 +162,10 @@ def run_national(cfg, cities, days=2, workers=8, progress=None, retries=2):
     for attempt in range(retries + 1):
         if not pending:
             break
+        if weather.in_cooldown():
+            # 已触发 Open-Meteo 限流：冷却期内重试只会空转（请求会被直接拒绝），
+            # 立刻放弃剩余城市，把已成功的部分先落盘，避免整轮白跑。
+            break
         res, fail = _run_batch(cfg, pending, days, workers,
                                progress=progress, start_done=done_base,
                                is_retry=attempt > 0)
@@ -143,7 +173,7 @@ def run_national(cfg, cities, days=2, workers=8, progress=None, retries=2):
         done_base += len(res)
         pending = [c for c in pending if c["name"] in fail]
         failures = fail
-        if pending and attempt < retries:
+        if pending and attempt < retries and not weather.in_cooldown():
             time.sleep(2.5)
     return results, failures
 
@@ -489,7 +519,9 @@ __TMAP_SCRIPT__
     const e = d && d.evening ? d.evening : null;
     const fmt = function (w) {
       if (!w) return '<span style="color:#94a3b8">暂无</span>';
-      return w.score + ' 分 · ' + w.vivid;
+      let s = w.score + ' 分 · ' + w.vivid;
+      if (w.dir) s += '<div style="font-size:10px;color:#94a3b8;margin-top:1px;">🧭 ' + w.dir + '</div>';
+      return s;
     };
     const dw = d && d.daily ? d.daily : null;
     let wxLine = '';
